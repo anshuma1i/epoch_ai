@@ -1,10 +1,6 @@
 .venv/*
 __pycache__/*
 *.pyc
-AGENTS.md
-GEMINI.md
-CLAUDE.md
-*.ipynb
 # *.png
 *.csv
 .DS_Store
