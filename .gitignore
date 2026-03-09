@@ -5,6 +5,6 @@ AGENTS.md
 GEMINI.md
 CLAUDE.md
 *.ipynb
-*.png
+# *.png
 *.csv
 .DS_Store
