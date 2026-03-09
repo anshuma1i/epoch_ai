@@ -343,6 +343,27 @@ solution_df = (
     .unstack(fill_value=0)
 )
 
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--grid-search', action='store_true', help='Run grid search')
+args = parser.parse_args()
+
+try:
+    debug_submission = pd.read_csv("debug_introduction_notebook_submission.csv")
+    if "track_id" in debug_submission.columns:
+        debug_submission = debug_submission.set_index("track_id")
+    map_score = score(solution_df, debug_submission)
+    print(f"\n=====================================")
+    print(f"mAP on debug test set: {map_score:.4f}")
+    print(f"=====================================\n")
+except Exception as e:
+    print(f"\nCould not evaluate debug test set: {e}\n")
+
+if not args.grid_search:
+    print("Skipping GridSearch. Use --grid-search to run it.")
+    import sys
+    sys.exit(0)
+
 from sklearn.model_selection import ParameterGrid
 
 print("Running GridSearch and SMOTE testing...")
