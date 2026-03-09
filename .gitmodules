@@ -1,0 +1,3 @@
+[submodule "bird-radar-visualisation"]
+	path = bird-radar-visualisation
+	url = https://github.com/TeamEpochGithub/aicup-birds-radar-detection-tool.git
