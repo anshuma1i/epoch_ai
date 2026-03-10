@@ -3,4 +3,5 @@ __pycache__/*
 *.pyc
 # *.png
 *.csv
+!dataset/*_with_knmi_286.csv
 .DS_Store
