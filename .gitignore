@@ -7,3 +7,4 @@ CLAUDE.md
 *.ipynb
 *.png
 *.csv
+.DS_Store
