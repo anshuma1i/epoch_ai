@@ -7,4 +7,5 @@ CLAUDE.md
 *.ipynb
 *.png
 *.csv
+!dataset/*_with_knmi_286.csv
 .DS_Store
