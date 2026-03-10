@@ -207,6 +207,28 @@ y
 
 from lightgbm import LGBMClassifier
 
+# ── Multi-class focal loss for LightGBM ──
+# Down-weights easy/well-classified examples, focuses on hard cases (minority classes).
+# LightGBM sklearn API calls: func(labels, preds, weight, group) with 4 positional args.
+FOCAL_GAMMA = 2.0
+N_CLASSES = 9  # Clutter + 8 bird groups
+
+def focal_loss_lgb(y_true, y_pred, *args, **kwargs):
+    """Multi-class focal loss custom objective for LightGBM."""
+    y_pred = y_pred.reshape(-1, N_CLASSES, order='F')
+    # Softmax probabilities
+    p = np.exp(y_pred - y_pred.max(axis=1, keepdims=True))  # numerical stability
+    p = p / p.sum(axis=1, keepdims=True)
+    # One-hot encode targets
+    y_onehot = np.eye(N_CLASSES)[y_true.astype(int)]
+    # Focal weight: (1 - p_t)^gamma
+    pt = (p * y_onehot).sum(axis=1, keepdims=True)
+    focal_weight = (1 - pt) ** FOCAL_GAMMA
+    # Gradient and Hessian
+    grad = (focal_weight * (p - y_onehot)).flatten(order='F')
+    hess = (focal_weight * p * (1 - p)).flatten(order='F')
+    return grad, hess
+
 lgb_model = LGBMClassifier(
     n_estimators=500,
     learning_rate=0.05,
@@ -223,70 +245,60 @@ lgb_model = LGBMClassifier(
 #---
 
 from sklearn.pipeline import Pipeline 
-from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer  
 from imblearn.pipeline import Pipeline as ImbPipeline  
-from imblearn.over_sampling import SMOTE
-from sklearn.compose import make_column_selector
-# numeric_transformer = Pipeline(steps=[
-#     ('imputer', SimpleImputer(strategy='median')),
-#     ('scaler', StandardScaler())
-# ])
+from imblearn.over_sampling import SMOTENC, RandomOverSampler
+from imblearn.combine import SMOTETomek
 
+# ── Step 1: cleanly separate numeric and categorical features ──
+numeric_features = [f for f in features if f != 'radar_bird_size']
+categorical_features = ['radar_bird_size']
 
-# preprocessor = ColumnTransformer(
-#     [('cat', OneHotEncoder(), ['radar_bird_size'])],
-#     remainder='passthrough'
-# )
+# After ColumnTransformer, column names are lost → we track indices by position.
+# The imputer outputs: [numeric cols..., categorical cols...]
+cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
+num_indices = list(range(len(numeric_features)))
 
-# pipeline = Pipeline([
-#     ('preprocess', preprocessor),
-#     ('model', HistGradientBoostingClassifier(random_state=42))
-# ])
-
-# Preprocessing for numeric columns: impute median then scale
-numeric_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='median')),
-    ('scaler', StandardScaler())
+# ── Stage 1: Imputation + ordinal encoding (data must be clean & numeric before oversampling) ──
+# OrdinalEncoder converts strings → integers so TomekLinks (inside SMOTETomek) can handle them.
+# SMOTENC still treats them as categorical via cat_indices.
+imputer = ColumnTransformer([
+    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+    ('cat_imputer', Pipeline([
+        ('impute', SimpleImputer(strategy='most_frequent')),
+        ('encode', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+    ]), categorical_features)
 ])
 
-# Preprocessing for categorical columns: impute most frequent then one-hot encode
-categorical_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='most_frequent')),
-    ('onehot', OneHotEncoder(handle_unknown='ignore'))
-])
+# ── Stage 2: Oversampling — SMOTENC + TomekLinks (hybrid) ──
+# SMOTENC handles mixed data: Euclidean distance for numeric, VDM for categorical.
+# TomekLinks cleans noisy boundary samples after oversampling.
+smotenc_tomek = SMOTETomek(
+    smote=SMOTENC(categorical_features=cat_indices, random_state=42),
+    random_state=42
+)
 
-# Combine preprocessing steps
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', numeric_transformer, make_column_selector(dtype_include='number')),
-        ('cat', categorical_transformer, make_column_selector(dtype_include='object'))
-    ])
-
-# Final pipeline: preprocessing -> SMOTE -> ensemble classifier
-# pipeline = ImbPipeline([
-#     ('preprocess', preprocessor),
-#     ('smote', SMOTE(random_state=42)),                     # generates synthetic samples for minority class
-#     ('model', HistGradientBoostingClassifier(random_state=42))
-# ])
+# ── Stage 3: Full pipeline (no scaling needed — LightGBM is tree-based) ──
 pipeline = ImbPipeline([
-    ('preprocess', preprocessor),
-    ('smote', SMOTE(random_state=42)),
+    ('imputer', imputer),
+    ('oversampler', smotenc_tomek),
     ('model', lgb_model)
 ])
 
 #---
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold
 
-n_splits = 5
+n_splits = 10
 
-cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+# Group-aware splits: tracks with same primary_observation_id are the same bird/flock.
+# Keeps them in the same fold to prevent data leakage.
+groups = train_df['primary_observation_id']
+cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-split = list(cv.split(X, y))
+split = list(cv.split(X, y, groups))
 
 for i, (train_idx, val_idx) in enumerate(split):
     print(f"fold {i+1} train: {len(train_idx)}, val:  {len(val_idx)}" )
@@ -366,14 +378,22 @@ if not args.grid_search:
 
 from sklearn.model_selection import ParameterGrid
 
-print("Running GridSearch and SMOTE testing...")
+print("Running GridSearch with multiple oversampling strategies...")
 
 # LightGBM hyperparameter grid
 param_grid = {
     'model__n_estimators': [50, 100, 300, 500, 1000],
     'model__learning_rate': [0.001, 0.01, 0.05, 0.1],
     'model__num_leaves': [15, 31, 63, 127, 255],
-    'smote': ['passthrough', SMOTE(random_state=42)] # Test with and without SMOTE
+    'model__class_weight': ['balanced', None],                                        # LightGBM built-in class imbalance handling
+    'model__objective': ['multiclass', focal_loss_lgb],                               # standard vs focal loss
+    'oversampler': [
+        'passthrough',                                                               # no oversampling
+        SMOTENC(categorical_features=cat_indices, random_state=42),                   # SMOTENC only
+        RandomOverSampler(random_state=42),                                           # simple duplication
+        SMOTETomek(smote=SMOTENC(categorical_features=cat_indices, random_state=42),  # SMOTENC + TomekLinks
+                   random_state=42),
+    ]
 }
 
 best_score = -1
@@ -416,7 +436,19 @@ for k, v in best_params.items():
 print("="*50)
 
 # Write out the recommendations to snippets.md
-smote_step = "'smote', SMOTE(random_state=42)" if best_params['smote'] != 'passthrough' else "'smote', 'passthrough'"
+best_oversampler = best_params.get('oversampler', 'passthrough')
+if best_oversampler == 'passthrough':
+    oversampler_step = "'oversampler', 'passthrough'"
+    oversampler_import = ""
+elif isinstance(best_oversampler, SMOTENC):
+    oversampler_step = f"'oversampler', SMOTENC(categorical_features={cat_indices}, random_state=42)"
+    oversampler_import = "from imblearn.over_sampling import SMOTENC"
+elif isinstance(best_oversampler, RandomOverSampler):
+    oversampler_step = "'oversampler', RandomOverSampler(random_state=42)"
+    oversampler_import = "from imblearn.over_sampling import RandomOverSampler"
+else:  # SMOTETomek
+    oversampler_step = f"'oversampler', SMOTETomek(smote=SMOTENC(categorical_features={cat_indices}, random_state=42), random_state=42)"
+    oversampler_import = "from imblearn.over_sampling import SMOTENC\nfrom imblearn.combine import SMOTETomek"
 
 snippet_content = f"""# Code Snippets to Maximize mAP (Optimized from GridSearch)
 
@@ -534,6 +566,9 @@ features = [
     'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'tortuosity', 'tortuosity_max'
 ]
 
+numeric_features = [f for f in features if f != 'radar_bird_size']
+categorical_features = ['radar_bird_size']
+
 X = train_df[features]
 X_test = test_df[features]
 ```
@@ -543,6 +578,27 @@ Replace your current classifier with LightGBM and use the optimized parameters f
 
 ```python
 from lightgbm import LGBMClassifier
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer  
+from imblearn.pipeline import Pipeline as ImbPipeline  
+{oversampler_import}
+
+# Cleanly separate numeric and categorical feature indices
+cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
+num_indices = list(range(len(numeric_features)))
+
+# Stage 1: Imputation
+imputer = ColumnTransformer([
+    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+    ('cat_imputer', SimpleImputer(strategy='most_frequent'), categorical_features)
+])
+
+# Stage 2: Scaling & Encoding
+scaler_encoder = ColumnTransformer([
+    ('scaler', StandardScaler(), num_indices),
+    ('onehot', OneHotEncoder(handle_unknown='ignore'), cat_indices)
+])
 
 lgb_model = LGBMClassifier(
     n_estimators={best_params['model__n_estimators']},
@@ -560,8 +616,9 @@ lgb_model = LGBMClassifier(
 
 # Final Pipeline configured with best parameters found
 pipeline = ImbPipeline([
-    ('preprocess', preprocessor),
-    ({smote_step}),
+    ('imputer', imputer),
+    ({oversampler_step}),
+    ('scaler_encoder', scaler_encoder),
     ('model', lgb_model)
 ])
 ```
