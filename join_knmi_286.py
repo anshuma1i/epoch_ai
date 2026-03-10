@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -20,7 +21,7 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
     Returns a dataframe with:
     - raw KNMI columns
     - a parsed UTC timestamp column: knmi_timestamp_utc
-    - some unit-converted weather columns
+    - unit-converted weather columns (*_scaled)
     """
     knmi_txt_path = Path(knmi_txt_path)
 
@@ -43,9 +44,7 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
     data_lines = []
     for line in lines[header_idx + 1 :]:
         clean = line.strip()
-        if not clean:
-            continue
-        if clean.startswith("#"):
+        if not clean or clean.startswith("#"):
             continue
         data_lines.append(clean)
 
@@ -53,7 +52,6 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
     for line in data_lines:
         parts = [p.strip() for p in line.split(",")]
 
-        # Pad/truncate to header length if needed
         if len(parts) < len(header_cols):
             parts = parts + [""] * (len(header_cols) - len(parts))
         elif len(parts) > len(header_cols):
@@ -73,7 +71,7 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
         except (ValueError, TypeError):
             pass
 
-    # Keep only requested station if mixed content ever appears
+    # Keep only requested station
     if "STN" in weather.columns:
         weather["STN"] = pd.to_numeric(weather["STN"], errors="coerce")
         weather = weather[weather["STN"] == station_id].copy()
@@ -83,8 +81,8 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
     base_date = pd.to_datetime(weather["YYYYMMDD"], format="%Y%m%d", errors="coerce")
 
     # KNMI HH is the end of the hourly division.
-    # Example: HH=5 means the interval 04:00-05:00 UTC.
-    # HH=24 should become next day 00:00 UTC.
+    # HH=5 means the interval 04:00-05:00 UTC.
+    # HH=24 rolls to next day 00:00 UTC.
     weather["HH"] = pd.to_numeric(weather["HH"], errors="coerce")
 
     hh_for_ts = weather["HH"].copy()
@@ -97,7 +95,7 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
         + pd.to_timedelta(hour_value, unit="h")
     )
 
-    # Optional: convert the main KNMI units into human-friendly units
+    # Unit conversions (KNMI stores in 0.1-units)
     conversions = {
         "FH": 10.0,    # hourly mean wind speed -> m/s
         "FF": 10.0,    # wind speed at observation time -> m/s
@@ -115,16 +113,13 @@ def parse_knmi_hourly_file(knmi_txt_path: str, station_id: int = 286) -> pd.Data
         if col in weather.columns:
             weather[f"{col}_scaled"] = pd.to_numeric(weather[col], errors="coerce") / divisor
 
-    # Sort for merge_asof
     weather = weather.sort_values("knmi_timestamp_utc").reset_index(drop=True)
 
     return weather
 
 
 def build_track_join_timestamp(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create radar timestamps and midpoint timestamp for each track.
-    """
+    """Create radar timestamps and midpoint timestamp for each track."""
     df = df.copy()
 
     df["timestamp_start_radar_utc"] = pd.to_datetime(
@@ -149,11 +144,9 @@ def join_weather_to_tracks(
     tracks_df: pd.DataFrame,
     weather_df: pd.DataFrame,
     station_id: int = 286,
-    tolerance_hours: int = 2,
+    tolerance_hours: int = 1,
 ) -> pd.DataFrame:
-    """
-    Join KNMI hourly weather row using hour-end bucket semantics based on track midpoint.
-    """
+    """Join KNMI hourly weather using hour-end bucket semantics based on track midpoint."""
     tracks_df = build_track_join_timestamp(tracks_df)
 
     weather_df = weather_df.copy()
@@ -163,7 +156,8 @@ def join_weather_to_tracks(
         weather_df["knmi_timestamp_utc"], utc=True, errors="coerce"
     )
 
-    # Keep a practical subset of weather columns
+    # Only keep columns with actual signal from station 286.
+    # Dropped: P_scaled, VV, N, WW, M, R, S, O, Y (100% null for this station)
     wanted_cols = [
         "knmi_timestamp_utc",
         "STN",
@@ -178,17 +172,8 @@ def join_weather_to_tracks(
         "Q",
         "DR_scaled",
         "RH_scaled",
-        "P_scaled",
-        "VV",
-        "N",
         "U",
-        "WW",
         "IX",
-        "M",
-        "R",
-        "S",
-        "O",
-        "Y",
     ]
     weather_keep = [c for c in wanted_cols if c in weather_df.columns]
     weather_small = weather_df[weather_keep].copy()
@@ -202,8 +187,7 @@ def join_weather_to_tracks(
     weather_small = weather_small.sort_values("knmi_timestamp_utc")
 
     # KNMI HH is the hour-end timestamp (HH=15 covers 14:00–15:00).
-    # Use direction="forward" so each midpoint joins to the KNMI hour
-    # whose interval contains it (i.e. the next hour-end on or after).
+    # direction="forward" joins each midpoint to the containing hour bucket.
     merged_valid = pd.merge_asof(
         tracks_valid,
         weather_small,
@@ -215,22 +199,41 @@ def join_weather_to_tracks(
 
     merged = pd.concat([merged_valid, tracks_invalid], ignore_index=True, sort=False)
 
-    # Rename joined weather columns clearly
-    rename_map = {}
-    for col in weather_small.columns:
-        if col == "knmi_timestamp_utc":
-            rename_map[col] = f"knmi_{station_id}_timestamp_utc"
-        elif col != "STN":
-            rename_map[col] = f"knmi_{station_id}_{col}"
-        else:
-            rename_map[col] = f"knmi_{station_id}_station_id"
-
+    # Rename to human-readable column names
+    rename_map = {
+        "knmi_timestamp_utc": "knmi_286_hour_end_timestamp_utc",
+        "STN": "knmi_286_station_id",
+        "DD": "knmi_286_wind_direction_degrees",
+        "FH_scaled": "knmi_286_hourly_mean_wind_speed_mps",
+        "FF_scaled": "knmi_286_wind_speed_at_observation_mps",
+        "FX_scaled": "knmi_286_max_wind_gust_mps",
+        "T_scaled": "knmi_286_air_temperature_c",
+        "T10N_scaled": "knmi_286_min_air_temperature_last_6h_c",
+        "TD_scaled": "knmi_286_dew_point_temperature_c",
+        "SQ_scaled": "knmi_286_sunshine_duration_hours",
+        "Q": "knmi_286_global_radiation_j_cm2",
+        "DR_scaled": "knmi_286_precipitation_duration_hours",
+        "RH_scaled": "knmi_286_precipitation_amount_mm",
+        "U": "knmi_286_relative_humidity_percent",
+        "IX": "knmi_286_weather_indicator_code",
+    }
+    rename_map = {k: v for k, v in rename_map.items() if k in merged.columns}
     merged = merged.rename(columns=rename_map)
 
+    # Encode wind direction: sin/cos with DD=990 ("variable wind") handling
+    dd_col = "knmi_286_wind_direction_degrees"
+    if dd_col in merged.columns:
+        dd = merged[dd_col]
+        variable_wind = dd == 990
+        dd_rad = np.where(variable_wind | dd.isna(), np.nan, np.deg2rad(dd))
+        merged["knmi_286_wind_dir_sin"] = np.where(variable_wind, 0.0, np.sin(dd_rad))
+        merged["knmi_286_wind_dir_cos"] = np.where(variable_wind, 0.0, np.cos(dd_rad))
+        merged["knmi_286_wind_dir_variable"] = variable_wind.astype(int)
+
     # Add time gap between track midpoint and matched KNMI hour
-    ts_col = f"knmi_{station_id}_timestamp_utc"
+    ts_col = "knmi_286_hour_end_timestamp_utc"
     if ts_col in merged.columns:
-        merged[f"knmi_{station_id}_time_diff_min"] = (
+        merged["knmi_286_match_time_difference_minutes"] = (
             merged["track_midpoint_utc"] - merged[ts_col]
         ).dt.total_seconds().abs() / 60.0
 
