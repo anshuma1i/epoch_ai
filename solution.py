@@ -1,51 +1,65 @@
-print("Hello from AI Cup")
-#---
+"""
+AI Cup 2026 — Bird Radar Track Classification
+Trains a LightGBM model with group-aware CV, generates submission.csv.
+"""
 
+import argparse
 import numpy as np
 import pandas as pd
 from shapely import wkb
+from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import average_precision_score
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OrdinalEncoder
+from lightgbm import LGBMClassifier
 import lightgbm as lgb
-#---
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTENC, RandomOverSampler
+from imblearn.combine import SMOTETomek
+from sklearn.model_selection import ParameterGrid
 
+# ─────────────────────────────────────────────
+# CLI Arguments
+# ─────────────────────────────────────────────
+parser = argparse.ArgumentParser(description='AI Cup 2026 Bird Radar Classification')
+parser.add_argument('--focal-loss', action='store_true',
+                    help='Use multi-class focal loss instead of standard multiclass objective')
+parser.add_argument('--passthrough', action='store_true',
+                    help='Disable oversampling entirely')
+parser.add_argument('--smotetomek', action='store_true',
+                    help='Use SMOTETomek (SMOTENC + TomekLinks) instead of SMOTENC-only')
+parser.add_argument('--boost-weak', type=float, default=0, metavar='MULT',
+                    help='Default sample weight multiplier for weak classes. E.g. --boost-weak 3')
+parser.add_argument('--boost-cormorants', type=float, default=0, metavar='MULT',
+                    help='Override boost multiplier for Cormorants (default: use --boost-weak)')
+parser.add_argument('--boost-waders', type=float, default=0, metavar='MULT',
+                    help='Override boost multiplier for Waders (default: use --boost-weak)')
+parser.add_argument('--boost-geese', type=float, default=0, metavar='MULT',
+                    help='Override boost multiplier for Geese (default: use --boost-weak)')
+parser.add_argument('--grid-search', action='store_true',
+                    help='Run grid search over hyperparameters (slow)')
+args = parser.parse_args()
 
-#---
+# ─────────────────────────────────────────────
+# 1. Load Data (KNMI-enriched)
+# ─────────────────────────────────────────────
+print("Loading KNMI-enriched datasets...")
+train_df = pd.read_csv("dataset/train_with_knmi_286.csv").set_index("track_id")
+test_df = pd.read_csv("dataset/test_with_knmi_286.csv").set_index("track_id")
+print(f"Train: {train_df.shape}, Test: {test_df.shape}")
 
-# import skyfield
-#---
-
-import pandas as pd
-
-train_df = pd.read_csv("dataset/train.csv")
-test_df = pd.read_csv("dataset/test.csv")
-
-train_df = train_df.set_index("track_id")
-test_df = test_df.set_index("track_id")
-
-train_df
-#---
-
-import matplotlib.pyplot as plt
-
-train_df['bird_group'].value_counts().plot.pie(autopct="%1.1f%%")
-plt.show()
-#---
-
-from shapely import wkb
-
-wkb_hex = train_df['trajectory'].iloc[0]
- 
-geom = wkb.loads(bytes.fromhex(wkb_hex))
-coords = list(geom.coords)
-
-coords
-#---
+# ─────────────────────────────────────────────
+# 2. Trajectory Parsing & Feature Extraction
+# ─────────────────────────────────────────────
 
 def parse_trajectory(hex_str):
     """Decode EWKB hex string into a list of (lon, lat, alt, rcs) tuples."""
     if not isinstance(hex_str, str) or len(hex_str) == 0:
         return []
     try:
-        # Load hex string (support both WKB and EWKB)
         geom = wkb.loads(bytes.fromhex(hex_str) if not hex_str.startswith('\x01') else hex_str, hex=True)
         if geom.geom_type == 'LineString':
             return list(geom.coords)
@@ -57,8 +71,9 @@ def parse_trajectory(hex_str):
         pass
     return []
 
+
 def trajectory_features(row):
-    """Extract numerous spatial and numeric features from a trajectory."""
+    """Extract spatial, RCS, and velocity features from a trajectory."""
     coords = parse_trajectory(row['trajectory'])
     n = len(coords)
     if n == 0:
@@ -66,171 +81,231 @@ def trajectory_features(row):
 
     lons = [c[0] for c in coords]
     lats = [c[1] for c in coords]
-    alts = [c[2] for c in coords] if len(coords[0]) > 2 else [np.nan]*n
-    rcs  = [c[3] for c in coords] if len(coords[0]) > 3 else [np.nan]*n
+    alts = [c[2] for c in coords] if len(coords[0]) > 2 else [np.nan] * n
+    rcs  = [c[3] for c in coords] if len(coords[0]) > 3 else [np.nan] * n
 
-    # Convert lat/lon distance to approx meters
-    dx = np.diff(lons) * 71000   
-    dy = np.diff(lats) * 111000  
+    # Horizontal displacement (degrees → approx metres at ~53°N)
+    dx = np.diff(lons) * 71000
+    dy = np.diff(lats) * 111000
     step_dist = np.sqrt(dx**2 + dy**2)
     total_dist = step_dist.sum() if len(step_dist) > 0 else 0.0
 
-    # Tortuosity (turning behavior)
+    # Tortuosity (turning behaviour)
     bearings = np.arctan2(dy, dx)
     bearing_changes = np.abs(np.diff(bearings)) if len(bearings) > 1 else np.array([0.0])
-    bearing_changes = np.minimum(bearing_changes, 2*np.pi - bearing_changes) 
+    bearing_changes = np.minimum(bearing_changes, 2 * np.pi - bearing_changes)
 
-    return pd.Series({
-        'n_points'           : n,
-        'total_dist_m'       : total_dist,
-        'mean_step_m'        : step_dist.mean() if len(step_dist) > 0 else 0.0,
-        'std_step_m'         : step_dist.std()  if len(step_dist) > 0 else 0.0,
-        'lon_range'          : max(lons) - min(lons),
-        'lat_range'          : max(lats) - min(lats),
-        'alt_mean'           : np.nanmean(alts),
-        'alt_std'            : np.nanstd(alts),
-        'rcs_mean'           : np.nanmean(rcs),
-        'rcs_std'            : np.nanstd(rcs),
-        'rcs_min'            : np.nanmin(rcs),
-        'rcs_max'            : np.nanmax(rcs),
-        'tortuosity'         : bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
-        'tortuosity_max'     : bearing_changes.max() if len(bearing_changes) > 0 else 0.0,
-    })
-#---
+    # Straightness index: displacement / total path length
+    displacement = np.sqrt(
+        ((lons[-1] - lons[0]) * 71000) ** 2 +
+        ((lats[-1] - lats[0]) * 111000) ** 2
+    )
+    straightness = displacement / (total_dist + 1e-6) if total_dist > 0 else 0.0
 
-def split_xyzm(wkb_hex):
-    geom = wkb.loads(bytes.fromhex(wkb_hex))
-    coords = list(geom.coords)
+    # Altitude change features
+    alt_arr = np.array(alts, dtype=float)
+    if n > 1 and not np.all(np.isnan(alt_arr)):
+        alt_changes = np.diff(alt_arr)
+        alt_climb_rate = np.nanmean(alt_changes)
+        alt_descent_rate = np.nanmin(alt_changes)
+        alt_variability = np.nanstd(alt_changes)
+    else:
+        alt_climb_rate = 0.0
+        alt_descent_rate = 0.0
+        alt_variability = 0.0
 
-    xs, ys, zs, RCSs = zip(*coords)
+    # RCS range
+    rcs_range = np.nanmax(rcs) - np.nanmin(rcs)
 
-    return pd.Series({
-        "x": xs,
-        "y":ys,
-        "z":zs,
-        "RCS":RCSs
-    })
+    feats = {
+        'n_points':       n,
+        'total_dist_m':   total_dist,
+        'mean_step_m':    step_dist.mean() if len(step_dist) > 0 else 0.0,
+        'std_step_m':     step_dist.std()  if len(step_dist) > 0 else 0.0,
+        'lon_range':      max(lons) - min(lons),
+        'lat_range':      max(lats) - min(lats),
+        'alt_mean':       np.nanmean(alts),
+        'alt_std':        np.nanstd(alts),
+        'rcs_mean':       np.nanmean(rcs),
+        'rcs_std':        np.nanstd(rcs),
+        'rcs_min':        np.nanmin(rcs),
+        'rcs_max':        np.nanmax(rcs),
+        'rcs_range':      rcs_range,
+        'tortuosity':     bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
+        'tortuosity_max': bearing_changes.max()  if len(bearing_changes) > 0 else 0.0,
+        'straightness':       straightness,
+        'alt_climb_rate':     alt_climb_rate,
+        'alt_descent_rate':   alt_descent_rate,
+        'alt_variability':    alt_variability,
+    }
+
+    # ── Speed & acceleration from trajectory_time ──
+    times = row.get('trajectory_time', '')
+    t_list = []
+    if isinstance(times, str) and times.strip():
+        try:
+            t_list = [float(x) for x in times.strip('[]').split(',')]
+        except ValueError:
+            pass
+    elif isinstance(times, (list, np.ndarray)):
+        t_list = list(times)
+
+    if len(t_list) == n and n > 1:
+        dt = np.diff(t_list)
+        dt = np.where(dt == 0, 1e-6, dt)  # avoid div-by-zero
+        speeds = step_dist / dt
+        feats['speed_mean'] = np.mean(speeds)
+        feats['speed_std']  = np.std(speeds)
+        feats['speed_max']  = np.max(speeds)
+
+        feats['speed_cv'] = np.std(speeds) / (np.mean(speeds) + 1e-6)
+
+        if len(speeds) > 1:
+            accel = np.diff(speeds) / dt[1:]
+            feats['accel_mean'] = np.mean(accel)
+            feats['accel_std']  = np.std(accel)
+        else:
+            feats['accel_mean'] = 0.0
+            feats['accel_std']  = 0.0
+    else:
+        feats['speed_mean'] = np.nan
+        feats['speed_std']  = np.nan
+        feats['speed_max']  = np.nan
+        feats['speed_cv']   = np.nan
+        feats['accel_mean'] = np.nan
+        feats['accel_std']  = np.nan
+
+    return pd.Series(feats)
 
 
-
-
-
-# extra_train_cols = train_df['trajectory'].apply(split_xyzm)
-# extra_test_cols = test_df['trajectory'].apply(split_xyzm)
-
-# train_df = train_df.join(extra_train_cols)
-
-# test_df = test_df.join(extra_test_cols)
-
-# train_df['mean_RCS'] = train_df['RCS'].apply(np.mean)
-# test_df['mean_RCS'] = test_df['RCS'].apply(np.mean)
-
-test_df
-#---
-
+# ─────────────────────────────────────────────
+# 3. Feature Engineering
+# ─────────────────────────────────────────────
 for df in [train_df, test_df]:
-    # Parse UTC timestamps
+    # Timestamps
     df['ts_start'] = pd.to_datetime(df['timestamp_start_radar_utc'], utc=True)
     df['ts_end']   = pd.to_datetime(df['timestamp_end_radar_utc'],   utc=True)
     df['duration_s'] = (df['ts_end'] - df['ts_start']).dt.total_seconds()
-    
-    # Extract time-of-day / seasonality features
-    df['hour']       = df['ts_start'].dt.hour
-    df['month']      = df['ts_start'].dt.month
+
+    # Time-of-day / seasonality
+    df['hour']  = df['ts_start'].dt.hour
+    df['month'] = df['ts_start'].dt.month
     df['is_daytime'] = ((df['hour'] >= 6) & (df['hour'] <= 20)).astype(int)
-    
-    # Derived features calculation
+
+    # Cyclical encoding
+    df['hour_sin']  = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos']  = np.cos(2 * np.pi * df['hour'] / 24)
+    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+
+    # Derived radar features
     df['alt_range']      = df['max_z'] - df['min_z']
     df['airspeed_per_m'] = df['airspeed'] / (df['max_z'] + 1)
-    
-print("Applying advanced trajectory features for train_df (this may take a minute) ...")
-extra_train_cols = train_df.apply(trajectory_features, axis=1)
-train_df = train_df.join(extra_train_cols)
 
-print("Applying advanced trajectory features for test_df...")
-extra_test_cols = test_df.apply(trajectory_features, axis=1)
-test_df = test_df.join(extra_test_cols)
+# Trajectory features
+print("Extracting trajectory features for train_df...")
+train_df = train_df.join(train_df.apply(trajectory_features, axis=1))
+print("Extracting trajectory features for test_df...")
+test_df = test_df.join(test_df.apply(trajectory_features, axis=1))
 
-train_df['mean_RCS'] = train_df['RCS'].apply(np.mean) if 'RCS' in train_df.columns else train_df['rcs_mean']
-test_df['mean_RCS'] = test_df['RCS'].apply(np.mean) if 'RCS' in test_df.columns else test_df['rcs_mean']
-
-test_df
-#---
-
-# import seaborn as sns
-
-# num_cols_to_plot = ['airspeed', 'max_z', 'mean_RCS']
-
-# for feat in num_cols_to_plot:
-#     plt.figure(figsize=(12,6))
-#     sns.boxplot(data=train_df, x='bird_group', y=feat, palette='viridis', hue='bird_group')
-#     plt.title(f"{feat} per bird_group")
-#     plt.xticks(rotation=45)
-#     plt.show()
-#     plt.close()
-#---
-
-#model input X
-#model targets y
-
-features = [
+# ─────────────────────────────────────────────
+# 4. Feature List
+# ─────────────────────────────────────────────
+base_features = [
     'airspeed', 'min_z', 'max_z', 'duration_s', 'radar_bird_size',
-    'hour', 'month', 'is_daytime', 'alt_range', 'airspeed_per_m',
-    'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
-    'lon_range', 'lat_range', 'alt_mean', 'alt_std',
-    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'tortuosity', 'tortuosity_max'
+    'hour', 'month', 'is_daytime',
+    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
+    'alt_range', 'airspeed_per_m',
 ]
 
-# X = train_df[features]
-# X_test = test_df[features]
-
-features = [
-    'airspeed', 'min_z', 'max_z', 'duration_s', 'radar_bird_size',
-    'hour', 'month', 'is_daytime', 'alt_range', 'airspeed_per_m',
+trajectory_feats = [
     'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
     'lon_range', 'lat_range', 'alt_mean', 'alt_std',
-    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'tortuosity', 'tortuosity_max'
+    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max',
+    'tortuosity', 'tortuosity_max',
+    'speed_mean', 'speed_std', 'speed_max',
+    'accel_mean', 'accel_std',
 ]
+
+knmi_features = [
+    'knmi_286_wind_direction_degrees',
+    'knmi_286_hourly_mean_wind_speed_mps',
+    'knmi_286_wind_speed_at_observation_mps',
+    'knmi_286_max_wind_gust_mps',
+    'knmi_286_air_temperature_c',
+    # knmi_286_min_air_temperature_last_6h_c excluded — 87% NaN
+    'knmi_286_dew_point_temperature_c',
+    'knmi_286_sunshine_duration_hours',
+    'knmi_286_global_radiation_j_cm2',
+    'knmi_286_precipitation_duration_hours',
+    'knmi_286_precipitation_amount_mm',
+    'knmi_286_relative_humidity_percent',
+    'knmi_286_weather_indicator_code',
+    'knmi_286_wind_dir_sin',
+    'knmi_286_wind_dir_cos',
+    'knmi_286_wind_dir_variable',
+]
+
+features = base_features + trajectory_feats + knmi_features
 
 X = train_df[features]
 X_test = test_df[features]
-
 y = train_df['bird_group']
 
-X
+print(f"Feature matrix: X={X.shape}, X_test={X_test.shape}, classes={y.nunique()}")
 
-print(X_test)
-#---
-
-y
-#---
-
-from lightgbm import LGBMClassifier
-
-# ── Multi-class focal loss for LightGBM ──
-# Down-weights easy/well-classified examples, focuses on hard cases (minority classes).
-# LightGBM sklearn API calls: func(labels, preds, weight, group) with 4 positional args.
+# ─────────────────────────────────────────────
+# 5. Focal Loss (optional)
+# ─────────────────────────────────────────────
+N_CLASSES = 9
 FOCAL_GAMMA = 2.0
-N_CLASSES = 9  # Clutter + 8 bird groups
 
-def focal_loss_lgb(y_true, y_pred, *args, **kwargs):
+def focal_loss_lgb(y_true, y_pred, *_args, **_kwargs):
     """Multi-class focal loss custom objective for LightGBM."""
     y_pred = y_pred.reshape(-1, N_CLASSES, order='F')
-    # Softmax probabilities
-    p = np.exp(y_pred - y_pred.max(axis=1, keepdims=True))  # numerical stability
+    # Softmax
+    p = np.exp(y_pred - y_pred.max(axis=1, keepdims=True))
     p = p / p.sum(axis=1, keepdims=True)
-    # One-hot encode targets
+    # One-hot
     y_onehot = np.eye(N_CLASSES)[y_true.astype(int)]
-    # Focal weight: (1 - p_t)^gamma
     pt = (p * y_onehot).sum(axis=1, keepdims=True)
     focal_weight = (1 - pt) ** FOCAL_GAMMA
-    # Gradient and Hessian
+    # Gradient & Hessian
     grad = (focal_weight * (p - y_onehot)).flatten(order='F')
     hess = (focal_weight * p * (1 - p)).flatten(order='F')
     return grad, hess
 
-lgb_model = LGBMClassifier(
-    n_estimators=500,
+# ─────────────────────────────────────────────
+# 6. Model & Pipeline
+# ─────────────────────────────────────────────
+numeric_features = [f for f in features if f != 'radar_bird_size']
+categorical_features = ['radar_bird_size']
+cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
+
+imputer = ColumnTransformer([
+    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+    ('cat_imputer', Pipeline([
+        ('impute', SimpleImputer(strategy='most_frequent')),
+        ('encode', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
+    ]), categorical_features)
+])
+
+# Oversampler selection
+if args.passthrough:
+    oversampler = 'passthrough'
+    print("Oversampler: passthrough (no oversampling)")
+elif args.smotetomek:
+    oversampler = SMOTETomek(
+        smote=SMOTENC(categorical_features=cat_indices, random_state=42),
+        random_state=42
+    )
+    print("Oversampler: SMOTETomek (SMOTENC + TomekLinks)")
+else:
+    oversampler = SMOTENC(categorical_features=cat_indices, random_state=42)
+    print("Oversampler: SMOTENC (default)")
+
+lgb_params = dict(
+    n_estimators=1000,
     learning_rate=0.05,
     num_leaves=63,
     min_child_samples=10,
@@ -240,393 +315,233 @@ lgb_model = LGBMClassifier(
     random_state=42,
     n_jobs=-1,
     device='gpu',
-    verbose=-1
-)
-#---
-
-from sklearn.pipeline import Pipeline 
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
-from sklearn.impute import SimpleImputer  
-from imblearn.pipeline import Pipeline as ImbPipeline  
-from imblearn.over_sampling import SMOTENC, RandomOverSampler
-from imblearn.combine import SMOTETomek
-
-# ── Step 1: cleanly separate numeric and categorical features ──
-numeric_features = [f for f in features if f != 'radar_bird_size']
-categorical_features = ['radar_bird_size']
-
-# After ColumnTransformer, column names are lost → we track indices by position.
-# The imputer outputs: [numeric cols..., categorical cols...]
-cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
-num_indices = list(range(len(numeric_features)))
-
-# ── Stage 1: Imputation + ordinal encoding (data must be clean & numeric before oversampling) ──
-# OrdinalEncoder converts strings → integers so TomekLinks (inside SMOTETomek) can handle them.
-# SMOTENC still treats them as categorical via cat_indices.
-imputer = ColumnTransformer([
-    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
-    ('cat_imputer', Pipeline([
-        ('impute', SimpleImputer(strategy='most_frequent')),
-        ('encode', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
-    ]), categorical_features)
-])
-
-# ── Stage 2: Oversampling — SMOTENC + TomekLinks (hybrid) ──
-# SMOTENC handles mixed data: Euclidean distance for numeric, VDM for categorical.
-# TomekLinks cleans noisy boundary samples after oversampling.
-smotenc_tomek = SMOTETomek(
-    smote=SMOTENC(categorical_features=cat_indices, random_state=42),
-    random_state=42
+    verbose=-1,
 )
 
-# ── Stage 3: Full pipeline (no scaling needed — LightGBM is tree-based) ──
+if args.focal_loss:
+    print("Using focal loss objective")
+    lgb_params['objective'] = focal_loss_lgb
+
+lgb_model = LGBMClassifier(**lgb_params)
+
+# Weak-class sample weight boosting
+WEAK_CLASSES = ['Cormorants', 'Waders', 'Geese']
+boost_weak_mult = args.boost_weak
+if boost_weak_mult > 0:
+    print(f"Boosting weak classes ({', '.join(WEAK_CLASSES)}) with {boost_weak_mult}x sample weight")
+
 pipeline = ImbPipeline([
     ('imputer', imputer),
-    ('oversampler', smotenc_tomek),
+    ('oversampler', oversampler),
     ('model', lgb_model)
 ])
 
-#---
-
-from sklearn.model_selection import StratifiedGroupKFold
-
+# ─────────────────────────────────────────────
+# 7. Group-Aware Cross-Validation + Training
+# ─────────────────────────────────────────────
 n_splits = 10
-
-# Group-aware splits: tracks with same primary_observation_id are the same bird/flock.
-# Keeps them in the same fold to prevent data leakage.
 groups = train_df['primary_observation_id']
 cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
-
 split = list(cv.split(X, y, groups))
 
-for i, (train_idx, val_idx) in enumerate(split):
-    print(f"fold {i+1} train: {len(train_idx)}, val:  {len(val_idx)}" )
-#---
-
-from sklearn.base import clone
-
-classes = np.unique(y)
-
+classes = np.sort(y.unique())
 oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
+test_preds = np.zeros((len(X_test), len(classes)))
 
-#---
-import pandas as pd
-import sklearn.metrics
+def run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult=0, label=""):
+    """Run group-aware CV, return OOF predictions and averaged test predictions."""
+    oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
+    test_preds = np.zeros((len(X_test), len(classes)))
 
-def score(
-    solution: pd.DataFrame, 
-    submission: pd.DataFrame, 
-) -> float:
-    #Takes in two pandas dataframe and computes the Macro-averaged Average Precision Score
-   
-    # Ensure all required columns are present
-    needed_columns = [
-        "Clutter", 
-        "Cormorants", 
-        "Pigeons", 
-        "Ducks", 
-        "Geese", 
-        "Gulls", 
-        "Birds of Prey", 
-        "Waders", 
-        "Songbirds",
-    ]
-    
-    # Reorder solution and submission columns/rows to match exactly
-    solution = solution.loc[solution.index, needed_columns]
-    submission = submission.loc[solution.index, needed_columns]
+    if label:
+        print(f"\n{label}")
+    print(f"Training {len(split)}-fold StratifiedGroupKFold...")
 
-    
-    # Compute the Average Precision score for all required columns
-    bird_score = sklearn.metrics.average_precision_score(
-        solution[needed_columns],
-        submission[needed_columns],
-        average='macro'
-    )
+    for i, (train_idx, val_idx) in enumerate(split):
+        X_train_fold = X.iloc[train_idx]
+        y_train_fold = y.iloc[train_idx]
+        X_val_fold   = X.iloc[val_idx]
+        y_val_fold   = y.iloc[val_idx]
 
-    return bird_score
+        pipeline_fold = clone(pipeline)
 
-# Get local OOF CV score solution dataframe
+        if boost_weak_mult > 0:
+            # Manually run imputer + oversampler
+            preprocessor = Pipeline([
+                (pipeline_fold.steps[0][0], pipeline_fold.steps[0][1]),  # imputer
+            ])
+            oversampler_step = pipeline_fold.steps[1][1]
+            model_step = pipeline_fold.steps[2][1]
+
+            X_transformed = preprocessor.fit_transform(X_train_fold, y_train_fold)
+            X_val_transformed = preprocessor.transform(X_val_fold)
+            X_test_transformed = preprocessor.transform(X_test)
+
+            if oversampler_step != 'passthrough':
+                X_resampled, y_resampled = oversampler_step.fit_resample(X_transformed, y_train_fold)
+            else:
+                X_resampled, y_resampled = X_transformed, y_train_fold
+
+            # Safe boosting: duplicate rows of weak classes instead of using sample_weight
+            # This avoids LightGBM C++ GPU crashes with custom float weights
+            if hasattr(y_resampled, 'isin'):
+                weak_mask = y_resampled.isin(WEAK_CLASSES)
+            else:
+                weak_mask = np.isin(y_resampled, WEAK_CLASSES)
+            
+            # Convert to numpy for concatenation
+            X_resampled_np = X_resampled if isinstance(X_resampled, np.ndarray) else X_resampled.values
+            y_resampled_np = y_resampled if isinstance(y_resampled, np.ndarray) else y_resampled.values
+            
+            # Get the rows to duplicate
+            X_weak = X_resampled_np[weak_mask]
+            y_weak = y_resampled_np[weak_mask]
+            
+            # We already have 1 copy. To get `boost_weak_mult` total copies, we add `boost_weak_mult - 1` copies.
+            repeats = int(boost_weak_mult) - 1
+            if repeats > 0 and len(X_weak) > 0:
+                X_resampled_np = np.vstack([X_resampled_np] + [X_weak] * repeats)
+                y_resampled_np = np.concatenate([y_resampled_np] + [y_weak] * repeats)
+
+            # Fit model without custom sample_weight (relies on class_weight='balanced')
+            model_step.fit(X_resampled_np, y_resampled_np)
+            val_proba = model_step.predict_proba(X_val_transformed)
+            test_proba = model_step.predict_proba(X_test_transformed)
+        else:
+            pipeline_fold.fit(X_train_fold, y_train_fold)
+            val_proba = pipeline_fold.predict_proba(X_val_fold)
+            test_proba = pipeline_fold.predict_proba(X_test)
+
+        oof_preds.iloc[val_idx] = val_proba
+        test_preds += test_proba
+
+        fold_ap = average_precision_score(
+            pd.get_dummies(y_val_fold).reindex(columns=classes, fill_value=0),
+            val_proba, average='macro'
+        )
+        print(f"  Fold {i+1}/{len(split)} — train: {len(train_idx)}, val: {len(val_idx)}, val mAP: {fold_ap:.4f}")
+
+    test_preds /= len(split)
+    return oof_preds, test_preds
+
+
+# ─────────────────────────────────────────────
+# 7b. Grid Search (optional)
+# ─────────────────────────────────────────────
+if args.grid_search:
+    print("\n" + "=" * 50)
+    print("GRID SEARCH MODE")
+    print("=" * 50)
+
+    # Oversampler options for grid search
+    oversampler_options = {
+        'smotenc': SMOTENC(categorical_features=cat_indices, random_state=42),
+        'smotetomek': SMOTETomek(
+            smote=SMOTENC(categorical_features=cat_indices, random_state=42),
+            random_state=42
+        ),
+        'passthrough': 'passthrough',
+    }
+
+    param_grid = {
+        'model__n_estimators': [300, 500, 1000],
+        'model__learning_rate': [0.01, 0.05, 0.1],
+        'model__num_leaves': [31, 63, 127],
+        'oversampler': list(oversampler_options.values()),
+    }
+
+    # Optionally include focal loss in the search
+    if args.focal_loss:
+        param_grid['model__objective'] = ['multiclass', focal_loss_lgb]
+
+    grid = list(ParameterGrid(param_grid))
+    print(f"Total configurations: {len(grid)}")
+
+    best_score = -1
+    best_params = None
+    best_oof = None
+    best_test = None
+
+    for i, params in enumerate(grid):
+        print(f"\n[{i+1}/{len(grid)}] {params}")
+        pipeline.set_params(**params)
+        oof, t_preds = run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult)
+
+        # Evaluate
+        solution_df = (
+            train_df.reset_index()
+            .groupby(["track_id", "bird_group"]).size()
+            .unstack(fill_value=0)
+        )
+        oof_aligned = oof.loc[solution_df.index, solution_df.columns]
+        needed_columns = [
+            "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
+            "Gulls", "Birds of Prey", "Waders", "Songbirds",
+        ]
+        s = average_precision_score(solution_df[needed_columns], oof_aligned[needed_columns], average='macro')
+        print(f"  → mAP: {s:.4f}")
+
+        if s > best_score:
+            best_score = s
+            best_params = params
+            best_oof = oof
+            best_test = t_preds
+
+    print(f"\n{'='*50}")
+    print(f"Best mAP: {best_score:.4f}")
+    print(f"Best params: {best_params}")
+    print(f"{'='*50}")
+
+    oof_preds = best_oof
+    test_preds = best_test
+
+else:
+    # ── Single run ──
+    oof_preds, test_preds = run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult)
+
+# ─────────────────────────────────────────────
+# 8. Evaluation
+# ─────────────────────────────────────────────
+needed_columns = [
+    "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
+    "Gulls", "Birds of Prey", "Waders", "Songbirds",
+]
+
+# Build ground-truth OOF solution
 solution_df = (
     train_df
+    .reset_index()
     .groupby(["track_id", "bird_group"])
     .size()
     .unstack(fill_value=0)
 )
 
-import argparse
-parser = argparse.ArgumentParser()
-parser.add_argument('--grid-search', action='store_true', help='Run grid search')
-args = parser.parse_args()
+# Align OOF predictions to solution_df
+oof_aligned = oof_preds.loc[solution_df.index, solution_df.columns]
 
-try:
-    debug_submission = pd.read_csv("debug_introduction_notebook_submission.csv")
-    if "track_id" in debug_submission.columns:
-        debug_submission = debug_submission.set_index("track_id")
-    map_score = score(solution_df, debug_submission)
-    print(f"\n=====================================")
-    print(f"mAP on debug test set: {map_score:.4f}")
-    print(f"=====================================\n")
-except Exception as e:
-    print(f"\nCould not evaluate debug test set: {e}\n")
-
-if not args.grid_search:
-    print("Skipping GridSearch. Use --grid-search to run it.")
-    import sys
-    sys.exit(0)
-
-from sklearn.model_selection import ParameterGrid
-
-print("Running GridSearch with multiple oversampling strategies...")
-
-# LightGBM hyperparameter grid
-param_grid = {
-    'model__n_estimators': [50, 100, 300, 500, 1000],
-    'model__learning_rate': [0.001, 0.01, 0.05, 0.1],
-    'model__num_leaves': [15, 31, 63, 127, 255],
-    'model__class_weight': ['balanced', None],                                        # LightGBM built-in class imbalance handling
-    'model__objective': ['multiclass', focal_loss_lgb],                               # standard vs focal loss
-    'oversampler': [
-        'passthrough',                                                               # no oversampling
-        SMOTENC(categorical_features=cat_indices, random_state=42),                   # SMOTENC only
-        RandomOverSampler(random_state=42),                                           # simple duplication
-        SMOTETomek(smote=SMOTENC(categorical_features=cat_indices, random_state=42),  # SMOTENC + TomekLinks
-                   random_state=42),
-    ]
-}
-
-best_score = -1
-best_params = None
-
-grid = list(ParameterGrid(param_grid))
-print(f"Total parameter combinations to test: {len(grid)}")
-
-for i, params in enumerate(grid):
-    print(f"\nEvaluating configuration {i+1}/{len(grid)}: {params}")
-    
-    # Update pipeline parameters
-    pipeline.set_params(**params)
-    
-    oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
-    
-    for train_idx, val_idx in split:
-        X_train_fold, y_train_fold = X.iloc[train_idx], y.iloc[train_idx]
-        X_val_fold, y_val_fold = X.iloc[val_idx], y.iloc[val_idx]
-        
-        pipeline_fold = clone(pipeline)
-        pipeline_fold.fit(X_train_fold, y_train_fold)
-        
-        val_preds = pipeline_fold.predict_proba(X_val_fold)
-        oof_preds.iloc[val_idx] = val_preds
-        
-    current_score = score(solution_df, oof_preds)
-    print(f"OOF mAP Score: {current_score:.4f}")
-    
-    if current_score > best_score:
-        best_score = current_score
-        best_params = params
-        best_oof_preds = oof_preds.copy()
-
-print("\n"+"="*50)
-print(f"Best Local OOF Score: {best_score:.4f}")
-print("Best Parameters:")
-for k, v in best_params.items():
-    print(f"  {k}: {v}")
-print("="*50)
-
-# Write out the recommendations to snippets.md
-best_oversampler = best_params.get('oversampler', 'passthrough')
-if best_oversampler == 'passthrough':
-    oversampler_step = "'oversampler', 'passthrough'"
-    oversampler_import = ""
-elif isinstance(best_oversampler, SMOTENC):
-    oversampler_step = f"'oversampler', SMOTENC(categorical_features={cat_indices}, random_state=42)"
-    oversampler_import = "from imblearn.over_sampling import SMOTENC"
-elif isinstance(best_oversampler, RandomOverSampler):
-    oversampler_step = "'oversampler', RandomOverSampler(random_state=42)"
-    oversampler_import = "from imblearn.over_sampling import RandomOverSampler"
-else:  # SMOTETomek
-    oversampler_step = f"'oversampler', SMOTETomek(smote=SMOTENC(categorical_features={cat_indices}, random_state=42), random_state=42)"
-    oversampler_import = "from imblearn.over_sampling import SMOTENC\nfrom imblearn.combine import SMOTETomek"
-
-snippet_content = f"""# Code Snippets to Maximize mAP (Optimized from GridSearch)
-
-Based on GridSearch optimization, here are the code snippets you can directly copy into your `test-notebook-aicup2026.ipynb` to engineer advanced trajectories features and upgrade to the LightGBM classifier.
-
-### Snippet 1: Import New Required Libraries
-Run this early in your notebook.
-
-```python
-import numpy as np
-import pandas as pd
-from shapely import wkb
-import lightgbm as lgb
-```
-
-### Snippet 2: Define Advanced Feature Engineering Functions
-Replace your basic `split_xyzm` approach with these robust trajectory geometry parsers.
-
-```python
-def parse_trajectory(hex_str):
-    \"\"\"Decode EWKB hex string into a list of (lon, lat, alt, rcs) tuples.\"\"\"
-    if not isinstance(hex_str, str) or len(hex_str) == 0:
-        return []
-    try:
-        # Load hex string (support both WKB and EWKB)
-        geom = wkb.loads(bytes.fromhex(hex_str) if not hex_str.startswith('\\x01') else hex_str, hex=True)
-        if geom.geom_type == 'LineString':
-            return list(geom.coords)
-        elif geom.geom_type == 'Point':
-            return [geom.coords[0]]
-        elif geom.geom_type in ('MultiPoint', 'GeometryCollection'):
-            return [g.coords[0] for g in geom.geoms]
-    except Exception:
-        pass
-    return []
-
-def trajectory_features(row):
-    \"\"\"Extract numerous spatial and numeric features from a trajectory.\"\"\"
-    coords = parse_trajectory(row['trajectory'])
-    n = len(coords)
-    if n == 0:
-        return pd.Series({{}})
-
-    lons = [c[0] for c in coords]
-    lats = [c[1] for c in coords]
-    alts = [c[2] for c in coords] if len(coords[0]) > 2 else [np.nan]*n
-    rcs  = [c[3] for c in coords] if len(coords[0]) > 3 else [np.nan]*n
-
-    # Convert lat/lon distance to approx meters
-    dx = np.diff(lons) * 71000   
-    dy = np.diff(lats) * 111000  
-    step_dist = np.sqrt(dx**2 + dy**2)
-    total_dist = step_dist.sum() if len(step_dist) > 0 else 0.0
-
-    # Tortuosity (turning behavior)
-    bearings = np.arctan2(dy, dx)
-    bearing_changes = np.abs(np.diff(bearings)) if len(bearings) > 1 else np.array([0.0])
-    bearing_changes = np.minimum(bearing_changes, 2*np.pi - bearing_changes) 
-
-    return pd.Series({{
-        'n_points'           : n,
-        'total_dist_m'       : total_dist,
-        'mean_step_m'        : step_dist.mean() if len(step_dist) > 0 else 0.0,
-        'std_step_m'         : step_dist.std()  if len(step_dist) > 0 else 0.0,
-        'lon_range'          : max(lons) - min(lons),
-        'lat_range'          : max(lats) - min(lats),
-        'alt_mean'           : np.nanmean(alts),
-        'alt_std'            : np.nanstd(alts),
-        'rcs_mean'           : np.nanmean(rcs),
-        'rcs_std'            : np.nanstd(rcs),
-        'rcs_min'            : np.nanmin(rcs),
-        'rcs_max'            : np.nanmax(rcs),
-        'tortuosity'         : bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
-        'tortuosity_max'     : bearing_changes.max() if len(bearing_changes) > 0 else 0.0,
-    }})
-```
-
-### Snippet 3: Extract Time Features & Apply Trajectory Engineering
-Run this *after* loading your `train_df` and `test_df` but *before* you define `X` and `X_test`. This replaces the `apply(split_xyzm)` block.
-
-```python
-for df in [train_df, test_df]:
-    # Parse UTC timestamps
-    df['ts_start'] = pd.to_datetime(df['timestamp_start_radar_utc'], utc=True)
-    df['ts_end']   = pd.to_datetime(df['timestamp_end_radar_utc'],   utc=True)
-    df['duration_s'] = (df['ts_end'] - df['ts_start']).dt.total_seconds()
-    
-    # Extract time-of-day / seasonality features
-    df['hour']       = df['ts_start'].dt.hour
-    df['month']      = df['ts_start'].dt.month
-    df['is_daytime'] = ((df['hour'] >= 6) & (df['hour'] <= 20)).astype(int)
-    
-    # Derived features calculation
-    df['alt_range']      = df['max_z'] - df['min_z']
-    df['airspeed_per_m'] = df['airspeed'] / (df['max_z'] + 1)
-    
-print("Applying advanced trajectory features for train_df (this may take a minute) ...")
-extra_train_cols = train_df.apply(trajectory_features, axis=1)
-train_df = train_df.join(extra_train_cols)
-
-print("Applying advanced trajectory features for test_df...")
-extra_test_cols = test_df.apply(trajectory_features, axis=1)
-test_df = test_df.join(extra_test_cols)
-```
-
-### Snippet 4: Update Your Feature List
-Modify the variable definition of `features`. The rest of your split logic (`X = train_df[features]`) remains identical.
-
-```python
-features = [
-    'airspeed', 'min_z', 'max_z', 'duration_s', 'radar_bird_size',
-    'hour', 'month', 'is_daytime', 'alt_range', 'airspeed_per_m',
-    'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
-    'lon_range', 'lat_range', 'alt_mean', 'alt_std',
-    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'tortuosity', 'tortuosity_max'
-]
-
-numeric_features = [f for f in features if f != 'radar_bird_size']
-categorical_features = ['radar_bird_size']
-
-X = train_df[features]
-X_test = test_df[features]
-```
-
-### Snippet 5: Upgrade your Model Pipeline Based on Grid Search Results
-Replace your current classifier with LightGBM and use the optimized parameters found by the gridsearch script.
-
-```python
-from lightgbm import LGBMClassifier
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.impute import SimpleImputer  
-from imblearn.pipeline import Pipeline as ImbPipeline  
-{oversampler_import}
-
-# Cleanly separate numeric and categorical feature indices
-cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
-num_indices = list(range(len(numeric_features)))
-
-# Stage 1: Imputation
-imputer = ColumnTransformer([
-    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
-    ('cat_imputer', SimpleImputer(strategy='most_frequent'), categorical_features)
-])
-
-# Stage 2: Scaling & Encoding
-scaler_encoder = ColumnTransformer([
-    ('scaler', StandardScaler(), num_indices),
-    ('onehot', OneHotEncoder(handle_unknown='ignore'), cat_indices)
-])
-
-lgb_model = LGBMClassifier(
-    n_estimators={best_params['model__n_estimators']},
-    learning_rate={best_params['model__learning_rate']},
-    num_leaves={best_params['model__num_leaves']},
-    min_child_samples=10,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    class_weight='balanced',
-    random_state=42,
-    n_jobs=-1,
-    device='gpu',
-    verbose=-1
+overall_map = average_precision_score(
+    solution_df[needed_columns],
+    oof_aligned[needed_columns],
+    average='macro'
 )
 
-# Final Pipeline configured with best parameters found
-pipeline = ImbPipeline([
-    ('imputer', imputer),
-    ({oversampler_step}),
-    ('scaler_encoder', scaler_encoder),
-    ('model', lgb_model)
-])
-```
-"""
+print(f"\n{'='*50}")
+print(f" OOF Macro-Averaged AP (mAP): {overall_map:.4f}")
+print(f"{'='*50}")
+print("\n Per-Class Average Precision:")
+for cls in needed_columns:
+    if cls in solution_df.columns and cls in oof_aligned.columns:
+        ap = average_precision_score(solution_df[cls], oof_aligned[cls])
+        print(f"   {cls:20s}: {ap:.4f}")
 
-with open("snippets.md", "w") as f:
-    f.write(snippet_content)
-    
-print("Successfully generated optimized snippets in snippets.md!")
-
-
+# ─────────────────────────────────────────────
+# 9. Generate Submission
+# ─────────────────────────────────────────────
+submission_df = pd.DataFrame(
+    test_preds,
+    index=X_test.index,
+    columns=classes
+)
+submission_df.index.name = 'track_id'
+submission_df.to_csv('submission.csv')
+print(f"\nSaved submission.csv ({len(submission_df)} rows)")
