@@ -202,6 +202,10 @@ for df in [train_df, test_df]:
     df['alt_range']      = df['max_z'] - df['min_z']
     df['airspeed_per_m'] = df['airspeed'] / (df['max_z'] + 1)
 
+    # Wind-relative features
+    df['headwind_component'] = df['airspeed'] - df['knmi_286_wind_speed_at_observation_mps']
+    df['airspeed_wind_ratio'] = df['airspeed'] / (df['knmi_286_hourly_mean_wind_speed_mps'] + 0.1)
+
 # Trajectory features
 print("Extracting trajectory features for train_df...")
 train_df = train_df.join(train_df.apply(trajectory_features, axis=1))
@@ -216,14 +220,17 @@ base_features = [
     'hour', 'month', 'is_daytime',
     'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
     'alt_range', 'airspeed_per_m',
+    'headwind_component', 'airspeed_wind_ratio',
 ]
 
 trajectory_feats = [
     'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
     'lon_range', 'lat_range', 'alt_mean', 'alt_std',
-    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max',
+    'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'rcs_range',
     'tortuosity', 'tortuosity_max',
-    'speed_mean', 'speed_std', 'speed_max',
+    'straightness',
+    'alt_climb_rate', 'alt_descent_rate', 'alt_variability',
+    'speed_mean', 'speed_std', 'speed_max', 'speed_cv',
     'accel_mean', 'accel_std',
 ]
 
@@ -324,11 +331,21 @@ if args.focal_loss:
 
 lgb_model = LGBMClassifier(**lgb_params)
 
-# Weak-class sample weight boosting
-WEAK_CLASSES = ['Cormorants', 'Waders', 'Geese']
-boost_weak_mult = args.boost_weak
-if boost_weak_mult > 0:
-    print(f"Boosting weak classes ({', '.join(WEAK_CLASSES)}) with {boost_weak_mult}x sample weight")
+# Per-class boost multipliers (fall back to --boost-weak if per-class not set)
+CLASS_BOOST = {}
+for cls, cli_val in [('Cormorants', args.boost_cormorants),
+                     ('Waders', args.boost_waders),
+                     ('Geese', args.boost_geese)]:
+    mult = cli_val if cli_val > 0 else args.boost_weak
+    if mult > 0:
+        CLASS_BOOST[cls] = mult
+
+if CLASS_BOOST:
+    print("Per-class boost multipliers:")
+    for cls, mult in CLASS_BOOST.items():
+        print(f"  {cls}: {mult}x")
+# Keep a single flag for backward compat in run_cv
+boost_weak_mult = 1 if CLASS_BOOST else 0
 
 pipeline = ImbPipeline([
     ('imputer', imputer),
@@ -382,28 +399,32 @@ def run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult=0, label=""):
             else:
                 X_resampled, y_resampled = X_transformed, y_train_fold
 
-            # Safe boosting: duplicate rows of weak classes instead of using sample_weight
+            # Safe boosting: duplicate rows per class with individual multipliers
             # This avoids LightGBM C++ GPU crashes with custom float weights
-            if hasattr(y_resampled, 'isin'):
-                weak_mask = y_resampled.isin(WEAK_CLASSES)
-            else:
-                weak_mask = np.isin(y_resampled, WEAK_CLASSES)
-            
-            # Convert to numpy for concatenation
             X_resampled_np = X_resampled if isinstance(X_resampled, np.ndarray) else X_resampled.values
             y_resampled_np = y_resampled if isinstance(y_resampled, np.ndarray) else y_resampled.values
-            
-            # Get the rows to duplicate
-            X_weak = X_resampled_np[weak_mask]
-            y_weak = y_resampled_np[weak_mask]
-            
-            # We already have 1 copy. To get `boost_weak_mult` total copies, we add `boost_weak_mult - 1` copies.
-            repeats = int(boost_weak_mult) - 1
-            if repeats > 0 and len(X_weak) > 0:
-                X_resampled_np = np.vstack([X_resampled_np] + [X_weak] * repeats)
-                y_resampled_np = np.concatenate([y_resampled_np] + [y_weak] * repeats)
 
-            # Fit model without custom sample_weight (relies on class_weight='balanced')
+            extra_X, extra_y = [], []
+            for cls, mult in CLASS_BOOST.items():
+                repeats = int(mult) - 1
+                if repeats <= 0:
+                    continue
+                if hasattr(y_resampled, 'values'):
+                    cls_mask = (y_resampled == cls).values
+                else:
+                    cls_mask = (y_resampled_np == cls)
+                X_cls = X_resampled_np[cls_mask]
+                y_cls = y_resampled_np[cls_mask]
+                if len(X_cls) > 0:
+                    extra_X.extend([X_cls] * repeats)
+                    extra_y.extend([y_cls] * repeats)
+
+            if extra_X:
+                X_resampled_np = np.vstack([X_resampled_np] + extra_X)
+                y_resampled_np = np.concatenate([y_resampled_np] + extra_y)
+
+            # Increase min_child_samples to avoid degenerate splits from duplicated rows
+            model_step.set_params(min_child_samples=max(10, int(len(X_resampled_np) * 0.01)))
             model_step.fit(X_resampled_np, y_resampled_np)
             val_proba = model_step.predict_proba(X_val_transformed)
             test_proba = model_step.predict_proba(X_test_transformed)
