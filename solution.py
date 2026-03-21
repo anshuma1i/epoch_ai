@@ -48,6 +48,12 @@ parser.add_argument('--two-stage', action='store_true',
                     help='Two-stage: binary Gull detector + 8-class non-Gull classifier')
 parser.add_argument('--dataset', choices=['knmi', 'openmeteo', 'all'], default='knmi',
                     help='Weather dataset to use (default: knmi)')
+parser.add_argument('--gull-threshold', type=float, default=0.5, metavar='T',
+                    help='Stage-1 threshold for calling Gull (default: 0.5). '
+                         'Higher values (e.g. 0.75) penalise Gull predictions.')
+parser.add_argument('--undersample-gulls', type=int, default=0, metavar='N',
+                    help='Undersample Gulls to N tracks before two-stage training '
+                         '(e.g. --undersample-gulls 500). 0 = no undersampling.')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────
@@ -744,6 +750,13 @@ if args.two_stage:
     ts_oof = pd.DataFrame(0.0, index=X.index, columns=classes)
     ts_test = np.zeros((len(X_test), len(classes)))
 
+    gull_thresh = args.gull_threshold
+    us_gulls = args.undersample_gulls
+    if gull_thresh != 0.5:
+        print(f"  Gull threshold: {gull_thresh} (raw p(Gull) must exceed this to count as Gull)")
+    if us_gulls > 0:
+        print(f"  Undersampling Gulls to {us_gulls} tracks per fold")
+
     print(f"Training {len(split)}-fold two-stage...")
     for i, (train_idx, val_idx) in enumerate(split):
         X_tr = X.iloc[train_idx]
@@ -751,13 +764,39 @@ if args.two_stage:
         y_tr = y.iloc[train_idx]
         y_va = y.iloc[val_idx]
 
+        # ── Optional: undersample Gulls in training set ──
+        if us_gulls > 0:
+            gull_mask = y_tr == 'Gulls'
+            gull_indices = y_tr.index[gull_mask]
+            non_gull_indices = y_tr.index[~gull_mask]
+            n_gulls = len(gull_indices)
+            if n_gulls > us_gulls:
+                rng = np.random.RandomState(42 + i)
+                keep = rng.choice(gull_indices, size=us_gulls, replace=False)
+                keep_idx = np.concatenate([keep, non_gull_indices.values])
+                X_tr = X_tr.loc[keep_idx]
+                y_tr = y_tr.loc[keep_idx]
+
         # ── Stage 1: Gull binary ──
         y_tr_bin = (y_tr == 'Gulls').astype(int)
         pipe1 = clone(binary_pipeline)
         pipe1.fit(X_tr, y_tr_bin)
         # p(Gull) is column index 1
-        val_p_gull = pipe1.predict_proba(X_va)[:, 1]
-        test_p_gull = pipe1.predict_proba(X_test)[:, 1]
+        val_p_gull_raw = pipe1.predict_proba(X_va)[:, 1]
+        test_p_gull_raw = pipe1.predict_proba(X_test)[:, 1]
+
+        # ── Asymmetric threshold: re-calibrate p(Gull) ──
+        if gull_thresh != 0.5:
+            # We want to maintain strict monotonic ranking. 
+            # If threshold is high (e.g. 0.8), we heavily suppress anything below it.
+            # Using exponentiation smoothly squashes probabilities without breaking rankings.
+            # Example: penalty maps threshold -> 0.5
+            gamma = np.log(0.5) / np.log(gull_thresh)
+            val_p_gull = np.power(val_p_gull_raw, gamma)
+            test_p_gull = np.power(test_p_gull_raw, gamma)
+        else:
+            val_p_gull = val_p_gull_raw
+            test_p_gull = test_p_gull_raw
 
         # ── Stage 2: non-Gull multi-class ──
         non_gull_mask = y_tr != 'Gulls'

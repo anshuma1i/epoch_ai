@@ -1,0 +1,113 @@
+=== Row Count Check ===
+Train: orig=2601, merged=2601, match=True
+Test:  orig=1872,  merged=1872,  match=True
+
+=== track_id Integrity ===
+Train IDs match: True
+Test IDs match:  True
+Train duplicate IDs in merged: 0
+Test duplicate IDs in merged:  0
+
+=== Row Order Integrity ===
+Train row order matches exactly: True
+Test row order matches exactly: True
+
+=== Time Difference Stats (minutes) ===
+--- KNMI ---
+Train gap stats:
+count    2601.000000
+mean       29.838937
+std        17.573012
+min         0.025000
+25%        14.308333
+50%        30.333333
+75%        45.275000
+max        59.991667
+Train NaN gap count: 0 / 2601
+Train max gap: 60.0 min
+
+Test gap stats:
+count    1872.000000
+mean       29.220152
+std        16.946836
+min         0.008333
+25%        15.112500
+50%        28.933333
+75%        42.712500
+max        59.933333
+Test NaN gap count: 0 / 1872
+Test max gap: 59.9 min
+--- OpenMeteo ---
+Train gap stats:
+count    2601.000000
+mean       30.161063
+std        17.573012
+min         0.008333
+25%        14.725000
+50%        29.666667
+75%        45.691667
+max        59.975000
+Train NaN gap count: 0 / 2601
+Train max gap: 60.0 min
+
+Test gap stats:
+count    1872.000000
+mean       30.779848
+std        16.946836
+min         0.066667
+25%        17.287500
+50%        31.066667
+75%        44.887500
+max        59.991667
+Test NaN gap count: 0 / 1872
+Test max gap: 60.0 min
+
+=== Column NaN Rates ===
+  knmi_286_hour_end_timestamp_utc: train=0.0% NaN, test=0.0% NaN
+  knmi_286_station_id: train=0.0% NaN, test=0.0% NaN
+  knmi_286_wind_direction_degrees: train=0.0% NaN, test=0.0% NaN
+  knmi_286_hourly_mean_wind_speed_mps: train=0.0% NaN, test=0.0% NaN
+  knmi_286_wind_speed_at_observation_mps: train=0.0% NaN, test=0.0% NaN
+  knmi_286_max_wind_gust_mps: train=0.0% NaN, test=0.0% NaN
+  knmi_286_air_temperature_c: train=0.0% NaN, test=0.0% NaN
+  knmi_286_min_air_temperature_last_6h_c: train=87.0% NaN, test=78.5% NaN
+  knmi_286_dew_point_temperature_c: train=0.0% NaN, test=0.0% NaN
+  knmi_286_sunshine_duration_hours: train=0.0% NaN, test=0.0% NaN
+  knmi_286_global_radiation_j_cm2: train=0.0% NaN, test=0.0% NaN
+  knmi_286_precipitation_duration_hours: train=0.0% NaN, test=0.0% NaN
+  knmi_286_precipitation_amount_mm: train=0.0% NaN, test=0.0% NaN
+  knmi_286_relative_humidity_percent: train=0.0% NaN, test=0.0% NaN
+  knmi_286_weather_indicator_code: train=0.0% NaN, test=0.0% NaN
+  openmeteo_air_temperature_2m_c: train=0.0% NaN, test=0.0% NaN
+  openmeteo_relative_humidity_2m_percent: train=0.0% NaN, test=0.0% NaN
+  openmeteo_dew_point_2m_c: train=0.0% NaN, test=0.0% NaN
+  openmeteo_precipitation_mm: train=0.0% NaN, test=0.0% NaN
+  openmeteo_cloud_cover_percent: train=0.0% NaN, test=0.0% NaN
+  openmeteo_cloud_cover_low_percent: train=0.0% NaN, test=0.0% NaN
+  openmeteo_cloud_cover_mid_percent: train=0.0% NaN, test=0.0% NaN
+  openmeteo_cloud_cover_high_percent: train=0.0% NaN, test=0.0% NaN
+  openmeteo_pressure_msl_hpa: train=0.0% NaN, test=0.0% NaN
+  openmeteo_surface_pressure_hpa: train=0.0% NaN, test=0.0% NaN
+  openmeteo_weather_code: train=0.0% NaN, test=0.0% NaN
+  openmeteo_wind_speed_10m_kmh: train=0.0% NaN, test=0.0% NaN
+  openmeteo_wind_direction_10m_degrees: train=0.0% NaN, test=0.0% NaN
+  openmeteo_wind_gusts_10m_kmh: train=0.0% NaN, test=0.0% NaN
+  openmeteo_shortwave_radiation_w_m2: train=0.0% NaN, test=0.0% NaN
+  openmeteo_direct_radiation_w_m2: train=0.0% NaN, test=0.0% NaN
+  openmeteo_diffuse_radiation_w_m2: train=0.0% NaN, test=0.0% NaN
+  openmeteo_sunshine_duration_s: train=0.0% NaN, test=0.0% NaN
+  openmeteo_vapour_pressure_deficit_kpa: train=0.0% NaN, test=0.0% NaN
+  openmeteo_is_day: train=0.0% NaN, test=0.0% NaN
+  openmeteo_matched_timestamp_utc: train=0.0% NaN, test=0.0% NaN
+  knmi_286_wind_dir_sin: train=0.0% NaN, test=0.0% NaN
+  knmi_286_wind_dir_cos: train=0.0% NaN, test=0.0% NaN
+  knmi_286_wind_dir_variable: train=0.0% NaN, test=0.0% NaN
+  knmi_286_match_time_difference_minutes: train=0.0% NaN, test=0.0% NaN
+  openmeteo_match_time_difference_minutes: train=0.0% NaN, test=0.0% NaN
+
+=== Spot Check: 5 Random Rows ===
+  track_id=31170020: midpoint=2023-10-25 13:55:47+00:00, knmi=2023-10-25 14:00:00+00:00 (4.2min), om=2023-10-25 13:00:00+00:00 (55.8min)
+  track_id=2630136: midpoint=2023-09-05 11:45:32+00:00, knmi=2023-09-05 12:00:00+00:00 (14.5min), om=2023-09-05 11:00:00+00:00 (45.5min)
+  track_id=2638347: midpoint=2023-09-05 11:59:26+00:00, knmi=2023-09-05 12:00:00+00:00 (0.6min), om=2023-09-05 11:00:00+00:00 (59.4min)
+  track_id=526922431: midpoint=2024-01-29 15:50:09+00:00, knmi=2024-01-29 16:00:00+00:00 (9.8min), om=2024-01-29 15:00:00+00:00 (50.1min)
+  track_id=31168546: midpoint=2023-10-25 13:51:14+00:00, knmi=2023-10-25 14:00:00+00:00 (8.8min), om=2023-10-25 13:00:00+00:00 (51.2min)
