@@ -41,7 +41,7 @@ Output: `submission.csv` with per-class probabilities.
 
 **Three feature groups:**
 - Base (20): airspeed, altitude, duration, radar_bird_size, cyclical time encodings, wind interactions, RCS-speed ratio, altitude-adjusted wind, tailwind/crosswind
-- Trajectory (25): decoded from EWKB hex — distances, speeds, tortuosity, sharp turn ratio, sinuosity, RCS stats, climb rates, position, heading
+- Trajectory (30): decoded from EWKB hex — distances, speeds, tortuosity, sharp turn ratio, sinuosity, RCS stats, climb rates, position, heading, speed CV
 - Weather (15-31): from KNMI station 286 and/or Open-Meteo API, selected via `--dataset`
 
 **Two-stage classifier (always on):**
@@ -54,6 +54,7 @@ Output: `submission.csv` with per-class probabilities.
 ## Key Files
 
 - `solution.py` — main pipeline with all CLI flags
+- `submission.ipynb` — notebook version of the default pipeline (for submission)
 - `grid_search_configs.py` — runs config combos, ranks by mAP
 - `diagnose_weak_classes.py` — weak class confusion analysis
 - `join_openmeteo_weather.py`, `join_knmi_286.py`, `join_all_weather.py` — weather data merging
