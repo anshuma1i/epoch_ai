@@ -20,6 +20,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTENC, RandomOverSampler
 from imblearn.combine import SMOTETomek
 from sklearn.model_selection import ParameterGrid
+from catboost import CatBoostClassifier
 
 # ─────────────────────────────────────────────
 # CLI Arguments
@@ -41,6 +42,8 @@ parser.add_argument('--boost-geese', type=float, default=0, metavar='MULT',
                     help='Override boost multiplier for Geese (default: use --boost-weak)')
 parser.add_argument('--grid-search', action='store_true',
                     help='Run grid search over hyperparameters (slow)')
+parser.add_argument('--ensemble', action='store_true',
+                    help='Ensemble LightGBM + CatBoost (simple average)')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────
@@ -519,6 +522,97 @@ if args.grid_search:
 else:
     # ── Single run ──
     oof_preds, test_preds = run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult)
+
+# ─────────────────────────────────────────────
+# 7c. CatBoost Ensemble (optional)
+# ─────────────────────────────────────────────
+if args.ensemble:
+    print("\n" + "=" * 50)
+    print("CATBOOST ENSEMBLE")
+    print("=" * 50)
+
+    # After ColumnTransformer, numeric cols come first, then cat cols
+    cb_cat_idx = [len(numeric_features) + i for i in range(len(categorical_features))]
+
+    cb_params = dict(
+        iterations=1000,
+        learning_rate=0.05,
+        depth=8,
+        l2_leaf_reg=3,
+        auto_class_weights='Balanced',
+        random_seed=42,
+        task_type='GPU',
+        verbose=0,
+    )
+
+    cb_oof = pd.DataFrame(0.0, index=X.index, columns=classes)
+    cb_test = np.zeros((len(X_test), len(classes)))
+
+    # CatBoost needs categoricals as strings, not ordinal-encoded floats
+    cb_imputer = ColumnTransformer([
+        ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+        ('cat_imputer', Pipeline([
+            ('impute', SimpleImputer(strategy='most_frequent')),
+        ]), categorical_features)
+    ])
+
+    print(f"Training {len(split)}-fold CatBoost...")
+    for i, (train_idx, val_idx) in enumerate(split):
+        X_train_fold = X.iloc[train_idx]
+        y_train_fold = y.iloc[train_idx]
+        X_val_fold = X.iloc[val_idx]
+
+        cb_imp = clone(cb_imputer)
+        X_tr = cb_imp.fit_transform(X_train_fold, y_train_fold)
+        X_va = cb_imp.transform(X_val_fold)
+        X_te = cb_imp.transform(X_test)
+
+        # Cast categorical columns to string for CatBoost
+        for ci in cb_cat_idx:
+            X_tr[:, ci] = X_tr[:, ci].astype(str)
+            X_va[:, ci] = X_va[:, ci].astype(str)
+            X_te[:, ci] = X_te[:, ci].astype(str)
+
+        cb = CatBoostClassifier(**cb_params)
+        cb.fit(X_tr, y_train_fold, eval_set=(X_va, y.iloc[val_idx]),
+               early_stopping_rounds=50, cat_features=cb_cat_idx)
+
+        val_proba = cb.predict_proba(X_va)
+        test_proba = cb.predict_proba(X_te)
+
+        cb_oof.iloc[val_idx] = val_proba
+        cb_test += test_proba
+
+        fold_ap = average_precision_score(
+            pd.get_dummies(y.iloc[val_idx]).reindex(columns=classes, fill_value=0),
+            val_proba, average='macro'
+        )
+        print(f"  Fold {i+1}/{len(split)} — val mAP: {fold_ap:.4f}")
+
+    cb_test /= len(split)
+
+    # Print CatBoost standalone score
+    solution_df_tmp = (
+        train_df.reset_index()
+        .groupby(["track_id", "bird_group"]).size()
+        .unstack(fill_value=0)
+    )
+    needed_columns_tmp = [
+        "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
+        "Gulls", "Birds of Prey", "Waders", "Songbirds",
+    ]
+    cb_oof_aligned = cb_oof.loc[solution_df_tmp.index, solution_df_tmp.columns]
+    cb_map = average_precision_score(
+        solution_df_tmp[needed_columns_tmp],
+        cb_oof_aligned[needed_columns_tmp],
+        average='macro'
+    )
+    print(f"\n  CatBoost standalone mAP: {cb_map:.4f}")
+
+    # Simple average ensemble
+    oof_preds = (oof_preds + cb_oof) / 2
+    test_preds = (test_preds + cb_test) / 2
+    print("  Ensembled LightGBM + CatBoost (simple average)")
 
 # ─────────────────────────────────────────────
 # 8. Evaluation
