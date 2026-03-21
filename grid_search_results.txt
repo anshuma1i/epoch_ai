@@ -1,0 +1,33 @@
+========================================================================================================================
+GRID SEARCH RESULTS — sorted by mAP (descending)
+========================================================================================================================
+
+Rank  Config                              mAP      Time    Clutter  Cormoran Pigeons  Ducks    Geese    Gulls    Birds of Waders   Songbird
+--------------------------------------------------------------------------------------------------------------------------------------
+ 1    openmeteo+ens+2stg                  0.6698   378
+ 2    openmeteo+ens+2stg+bw3              0.6672   456
+ 3    openmeteo+ens                       0.6652   247
+ 4    openmeteo+ens+bw3                   0.6648   314
+ 5    openmeteo+2stg+bw3                  0.6642   417
+ 6    openmeteo+bw3                       0.6635   278
+ 7    all+ens+2stg                        0.6608   400
+ 8    all+ens+2stg+bw3                    0.6607   484
+ 9    openmeteo+2stg                      0.6602   350
+10    knmi+ens                            0.6600   243
+11    knmi+ens+2stg+bw3                   0.6599   456
+12    knmi+ens+2stg                       0.6598   382
+13    all+ens                             0.6597   259
+14    knmi+ens+bw3                        0.6578   314
+15    all+ens+bw3                         0.6559   338
+16    openmeteo                           0.6550   212
+17    all+2stg+bw3                        0.6540   438
+18    all+bw3                             0.6540   296
+19    all+2stg                            0.6537   370
+20    all                                 0.6472   226
+21    knmi+2stg                           0.6459   350
+22    knmi+bw3                            0.6443   278
+23    knmi                                0.6429   195
+24    knmi+2stg+bw3                       0.6424   417
+
+Best: openmeteo+ens+2stg — mAP 0.6698
+Total time: 8138s
