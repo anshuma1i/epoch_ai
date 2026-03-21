@@ -44,6 +44,8 @@ parser.add_argument('--grid-search', action='store_true',
                     help='Run grid search over hyperparameters (slow)')
 parser.add_argument('--ensemble', action='store_true',
                     help='Ensemble LightGBM + CatBoost (simple average)')
+parser.add_argument('--two-stage', action='store_true',
+                    help='Two-stage: binary Gull detector + 8-class non-Gull classifier')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────
@@ -613,6 +615,127 @@ if args.ensemble:
     oof_preds = (oof_preds + cb_oof) / 2
     test_preds = (test_preds + cb_test) / 2
     print("  Ensembled LightGBM + CatBoost (simple average)")
+
+# ─────────────────────────────────────────────
+# 7d. Two-Stage Gull Detector (optional)
+# ─────────────────────────────────────────────
+if args.two_stage:
+    print("\n" + "=" * 50)
+    print("TWO-STAGE GULL DETECTOR")
+    print("=" * 50)
+
+    non_gull_classes = np.sort([c for c in classes if c != 'Gulls'])
+
+    # Stage 1: Binary Gull vs non-Gull
+    y_binary = (y == 'Gulls').astype(int)
+
+    lgb_binary = LGBMClassifier(
+        n_estimators=1000, learning_rate=0.05, num_leaves=63,
+        min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
+        class_weight='balanced', random_state=42, n_jobs=-1,
+        device='gpu', verbose=-1,
+    )
+    binary_pipeline = ImbPipeline([
+        ('imputer', clone(imputer)),
+        ('oversampler', 'passthrough'),
+        ('model', lgb_binary)
+    ])
+
+    # Stage 2: 8-class on non-Gull samples only
+    lgb_multi = LGBMClassifier(
+        n_estimators=1000, learning_rate=0.05, num_leaves=63,
+        min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
+        class_weight='balanced', random_state=42, n_jobs=-1,
+        device='gpu', verbose=-1,
+    )
+    multi_pipeline = ImbPipeline([
+        ('imputer', clone(imputer)),
+        ('oversampler', 'passthrough'),
+        ('model', lgb_multi)
+    ])
+
+    ts_oof = pd.DataFrame(0.0, index=X.index, columns=classes)
+    ts_test = np.zeros((len(X_test), len(classes)))
+
+    print(f"Training {len(split)}-fold two-stage...")
+    for i, (train_idx, val_idx) in enumerate(split):
+        X_tr = X.iloc[train_idx]
+        X_va = X.iloc[val_idx]
+        y_tr = y.iloc[train_idx]
+        y_va = y.iloc[val_idx]
+
+        # ── Stage 1: Gull binary ──
+        y_tr_bin = (y_tr == 'Gulls').astype(int)
+        pipe1 = clone(binary_pipeline)
+        pipe1.fit(X_tr, y_tr_bin)
+        # p(Gull) is column index 1
+        val_p_gull = pipe1.predict_proba(X_va)[:, 1]
+        test_p_gull = pipe1.predict_proba(X_test)[:, 1]
+
+        # ── Stage 2: non-Gull multi-class ──
+        non_gull_mask = y_tr != 'Gulls'
+        X_tr_ng = X_tr[non_gull_mask]
+        y_tr_ng = y_tr[non_gull_mask]
+
+        pipe2 = clone(multi_pipeline)
+        pipe2.fit(X_tr_ng, y_tr_ng)
+        # Get class order from fitted model
+        s2_classes = pipe2.classes_
+
+        val_p_rest = pipe2.predict_proba(X_va)
+        test_p_rest = pipe2.predict_proba(X_test)
+
+        # ── Combine: p(class) = (1 - p_gull) * p(class | non-gull) ──
+        val_combined = np.zeros((len(X_va), len(classes)))
+        test_combined = np.zeros((len(X_test), len(classes)))
+
+        gull_idx = list(classes).index('Gulls')
+        val_combined[:, gull_idx] = val_p_gull
+        test_combined[:, gull_idx] = test_p_gull
+
+        for j, cls in enumerate(s2_classes):
+            cls_idx = list(classes).index(cls)
+            val_combined[:, cls_idx] = (1 - val_p_gull) * val_p_rest[:, j]
+            test_combined[:, cls_idx] = (1 - test_p_gull) * test_p_rest[:, j]
+
+        ts_oof.iloc[val_idx] = val_combined
+        ts_test += test_combined
+
+        fold_ap = average_precision_score(
+            pd.get_dummies(y_va).reindex(columns=classes, fill_value=0),
+            val_combined, average='macro'
+        )
+        print(f"  Fold {i+1}/{len(split)} — val mAP: {fold_ap:.4f}")
+
+    ts_test /= len(split)
+
+    # Print two-stage standalone score
+    solution_df_ts = (
+        train_df.reset_index()
+        .groupby(["track_id", "bird_group"]).size()
+        .unstack(fill_value=0)
+    )
+    needed_ts = [
+        "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
+        "Gulls", "Birds of Prey", "Waders", "Songbirds",
+    ]
+    ts_oof_aligned = ts_oof.loc[solution_df_ts.index, solution_df_ts.columns]
+    ts_map = average_precision_score(
+        solution_df_ts[needed_ts], ts_oof_aligned[needed_ts], average='macro'
+    )
+    print(f"\n  Two-stage standalone mAP: {ts_map:.4f}")
+
+    # Print per-class for comparison
+    print("  Per-class AP (two-stage):")
+    for cls in needed_ts:
+        if cls in solution_df_ts.columns:
+            ap = average_precision_score(solution_df_ts[cls], ts_oof_aligned[cls])
+            print(f"    {cls:20s}: {ap:.4f}")
+
+    # Average two-stage with existing predictions
+    oof_preds = (oof_preds + ts_oof) / 2
+    test_preds = (test_preds + ts_test) / 2
+    print("\n  Ensembled with base model (simple average)")
 
 # ─────────────────────────────────────────────
 # 8. Evaluation
