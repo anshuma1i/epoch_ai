@@ -46,14 +46,69 @@ parser.add_argument('--ensemble', action='store_true',
                     help='Ensemble LightGBM + CatBoost (simple average)')
 parser.add_argument('--two-stage', action='store_true',
                     help='Two-stage: binary Gull detector + 8-class non-Gull classifier')
+parser.add_argument('--dataset', choices=['knmi', 'openmeteo'], default='knmi',
+                    help='Weather dataset to use (default: knmi)')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────
-# 1. Load Data (KNMI-enriched)
+# 1. Dataset Configuration & Loading
 # ─────────────────────────────────────────────
-print("Loading KNMI-enriched datasets...")
-train_df = pd.read_csv("dataset/train_with_knmi_286.csv").set_index("track_id")
-test_df = pd.read_csv("dataset/test_with_knmi_286.csv").set_index("track_id")
+DATASET_CONFIG = {
+    'knmi': {
+        'train': 'dataset/train_with_knmi_286.csv',
+        'test': 'dataset/test_with_knmi_286.csv',
+        'wind_speed_col': 'knmi_286_hourly_mean_wind_speed_mps',
+        'wind_speed_obs_col': 'knmi_286_wind_speed_at_observation_mps',
+        'wind_unit_factor': 1.0,  # already m/s
+        'weather_features': [
+            'knmi_286_wind_direction_degrees',
+            'knmi_286_hourly_mean_wind_speed_mps',
+            'knmi_286_wind_speed_at_observation_mps',
+            'knmi_286_max_wind_gust_mps',
+            'knmi_286_air_temperature_c',
+            'knmi_286_dew_point_temperature_c',
+            'knmi_286_sunshine_duration_hours',
+            'knmi_286_global_radiation_j_cm2',
+            'knmi_286_precipitation_duration_hours',
+            'knmi_286_precipitation_amount_mm',
+            'knmi_286_relative_humidity_percent',
+            'knmi_286_weather_indicator_code',
+            'knmi_286_wind_dir_sin',
+            'knmi_286_wind_dir_cos',
+            'knmi_286_wind_dir_variable',
+        ],
+    },
+    'openmeteo': {
+        'train': 'dataset/train_with_openmeteo.csv',
+        'test': 'dataset/test_with_openmeteo.csv',
+        'wind_speed_col': 'openmeteo_wind_speed_10m_kmh',
+        'wind_speed_obs_col': 'openmeteo_wind_speed_10m_kmh',
+        'wind_unit_factor': 1 / 3.6,  # km/h → m/s
+        'weather_features': [
+            'openmeteo_air_temperature_2m_c',
+            'openmeteo_relative_humidity_2m_percent',
+            'openmeteo_dew_point_2m_c',
+            'openmeteo_precipitation_mm',
+            'openmeteo_cloud_cover_percent',
+            'openmeteo_pressure_msl_hpa',
+            'openmeteo_weather_code',
+            'openmeteo_wind_speed_10m_kmh',
+            'openmeteo_wind_direction_10m_degrees',
+            'openmeteo_wind_gusts_10m_kmh',
+            'openmeteo_shortwave_radiation_w_m2',
+            'openmeteo_sunshine_duration_s',
+            'openmeteo_vapour_pressure_deficit_kpa',
+            'openmeteo_is_day',
+            'openmeteo_wind_dir_sin',
+            'openmeteo_wind_dir_cos',
+        ],
+    },
+}
+
+ds = DATASET_CONFIG[args.dataset]
+print(f"Loading {args.dataset} dataset...")
+train_df = pd.read_csv(ds['train']).set_index("track_id")
+test_df = pd.read_csv(ds['test']).set_index("track_id")
 print(f"Train: {train_df.shape}, Test: {test_df.shape}")
 
 # ─────────────────────────────────────────────
@@ -207,9 +262,16 @@ for df in [train_df, test_df]:
     df['alt_range']      = df['max_z'] - df['min_z']
     df['airspeed_per_m'] = df['airspeed'] / (df['max_z'] + 1)
 
-    # Wind-relative features
-    df['headwind_component'] = df['airspeed'] - df['knmi_286_wind_speed_at_observation_mps']
-    df['airspeed_wind_ratio'] = df['airspeed'] / (df['knmi_286_hourly_mean_wind_speed_mps'] + 0.1)
+    # Wind-relative features (convert to m/s if needed)
+    wf = ds['wind_unit_factor']
+    df['headwind_component'] = df['airspeed'] - df[ds['wind_speed_obs_col']] * wf
+    df['airspeed_wind_ratio'] = df['airspeed'] / (df[ds['wind_speed_col']] * wf + 0.1)
+
+    # Compute wind direction sin/cos for openmeteo (KNMI has them pre-computed)
+    if args.dataset == 'openmeteo':
+        wd = df['openmeteo_wind_direction_10m_degrees']
+        df['openmeteo_wind_dir_sin'] = np.sin(2 * np.pi * wd / 360)
+        df['openmeteo_wind_dir_cos'] = np.cos(2 * np.pi * wd / 360)
 
 # Trajectory features
 print("Extracting trajectory features for train_df...")
@@ -239,26 +301,9 @@ trajectory_feats = [
     'accel_mean', 'accel_std',
 ]
 
-knmi_features = [
-    'knmi_286_wind_direction_degrees',
-    'knmi_286_hourly_mean_wind_speed_mps',
-    'knmi_286_wind_speed_at_observation_mps',
-    'knmi_286_max_wind_gust_mps',
-    'knmi_286_air_temperature_c',
-    # knmi_286_min_air_temperature_last_6h_c excluded — 87% NaN
-    'knmi_286_dew_point_temperature_c',
-    'knmi_286_sunshine_duration_hours',
-    'knmi_286_global_radiation_j_cm2',
-    'knmi_286_precipitation_duration_hours',
-    'knmi_286_precipitation_amount_mm',
-    'knmi_286_relative_humidity_percent',
-    'knmi_286_weather_indicator_code',
-    'knmi_286_wind_dir_sin',
-    'knmi_286_wind_dir_cos',
-    'knmi_286_wind_dir_variable',
-]
+weather_features = ds['weather_features']
 
-features = base_features + trajectory_feats + knmi_features
+features = base_features + trajectory_feats + weather_features
 
 X = train_df[features]
 X_test = test_df[features]
