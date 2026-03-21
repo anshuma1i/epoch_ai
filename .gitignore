@@ -6,3 +6,4 @@ __pycache__/*
 !dataset/*_with_knmi_286.csv
 !dataset/*_with_openmeteo.csv
 .DS_Store
+catboost_info/

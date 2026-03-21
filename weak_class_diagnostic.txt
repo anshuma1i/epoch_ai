@@ -1,0 +1,155 @@
+============================================================
+1. CLASS DISTRIBUTION
+============================================================
+  Birds of Prey       :   108 (  4.2%) ████
+  Clutter             :    84 (  3.2%) ███
+  Cormorants          :    40 (  1.5%) █
+  Ducks               :    58 (  2.2%) ██
+  Geese               :    83 (  3.2%) ███
+  Gulls               :  1503 ( 57.8%) █████████████████████████████████████████████████████████
+  Pigeons             :   122 (  4.7%) ████
+  Songbirds           :   483 ( 18.6%) ██████████████████
+  Waders              :   120 (  4.6%) ████
+
+  Total samples: 2601
+  Smallest class: Cormorants (40 samples)
+  Largest class:  Gulls (1503 samples)
+  Imbalance ratio: 37.6x
+
+============================================================
+2. SPECIES BREAKDOWN (bird_species within bird_group)
+============================================================
+
+  Cormorants (40 tracks):
+    Great Cormorant: 40
+
+  Waders (120 tracks):
+    Northern Lapwing: 34
+    European Golden Plover: 31
+    Eurasian Curlew: 23
+    Eurasian Oystercatcher: 16
+    Wader: 8
+    Common Snipe: 3
+    Common Redshank: 2
+    Dunlin: 1
+    Sanderling: 1
+    Grey Plover: 1
+
+  Geese (83 tracks):
+    Greylag Goose: 34
+    Tundra Bean Goose: 25
+    Barnacle Goose: 9
+    Greater White-fronted Goose: 8
+    Goose: 6
+    Egyptian Goose: 1
+
+============================================================
+3. RADAR BIRD SIZE vs BIRD GROUP (confusion source?)
+============================================================
+
+radar_bird_size  Flock  Large bird  Medium bird  Small bird
+bird_group                                                 
+Birds of Prey      0.0         0.9          5.6        93.5
+Clutter            1.2        67.9         20.2        10.7
+Cormorants         2.5        55.0         10.0        32.5
+Ducks              1.7        43.1         15.5        39.7
+Geese             31.3        48.2         16.9         3.6
+Gulls             10.0        12.3          4.2        73.5
+Pigeons           15.6        41.0          0.8        42.6
+Songbirds         26.5        10.6          2.1        60.9
+Waders            15.0        15.0         21.7        48.3
+
+============================================================
+4. FEATURE STATISTICS FOR WEAK vs STRONG CLASSES
+============================================================
+
+  airspeed:
+    Birds of Prey       : mean=    11.8  std=     2.9  median=    11.5
+    Clutter             : mean=    19.9  std=     5.6  median=    19.8
+    Cormorants          : mean=    15.8  std=     2.9  median=    16.2 ◄ WEAK
+    Ducks               : mean=    19.5  std=     2.2  median=    19.5
+    Geese               : mean=    18.1  std=     3.4  median=    17.6 ◄ WEAK
+    Gulls               : mean=    14.5  std=     2.8  median=    14.1
+    Pigeons             : mean=    18.9  std=     2.6  median=    19.1
+    Songbirds           : mean=    15.7  std=     3.3  median=    15.4
+    Waders              : mean=    17.2  std=     3.6  median=    16.4 ◄ WEAK
+
+  min_z:
+    Birds of Prey       : mean=    27.5  std=    54.2  median=     4.3
+    Clutter             : mean=    52.9  std=    58.4  median=    46.8
+    Cormorants          : mean=    24.7  std=    40.0  median=     2.7 ◄ WEAK
+    Ducks               : mean=     8.0  std=    26.1  median=     0.0
+    Geese               : mean=    57.2  std=    78.9  median=    12.5 ◄ WEAK
+    Gulls               : mean=    22.9  std=    36.7  median=     6.8
+    Pigeons             : mean=    21.3  std=    22.2  median=    15.6
+    Songbirds           : mean=    11.5  std=    24.8  median=     2.0
+    Waders              : mean=    63.5  std=   119.7  median=     4.3 ◄ WEAK
+
+  max_z:
+    Birds of Prey       : mean=    76.8  std=    77.0  median=    45.4
+    Clutter             : mean=   113.9  std=    75.7  median=   121.5
+    Cormorants          : mean=    59.1  std=    45.6  median=    45.3 ◄ WEAK
+    Ducks               : mean=    39.4  std=    35.5  median=    28.4
+    Geese               : mean=   109.2  std=    80.7  median=    81.5 ◄ WEAK
+    Gulls               : mean=    70.1  std=    43.3  median=    61.0
+    Pigeons             : mean=    52.7  std=    24.1  median=    50.4
+    Songbirds           : mean=    41.3  std=    36.7  median=    29.1
+    Waders              : mean=   112.0  std=   122.3  median=    64.5 ◄ WEAK
+
+  duration_s:
+    Birds of Prey       : mean=    74.6  std=    69.9  median=    60.5
+    Clutter             : mean=    21.4  std=    13.5  median=    17.0
+    Cormorants          : mean=    76.5  std=    50.5  median=    67.5 ◄ WEAK
+    Ducks               : mean=    47.4  std=    41.2  median=    34.5
+    Geese               : mean=    77.2  std=    60.6  median=    59.0 ◄ WEAK
+    Gulls               : mean=    73.0  std=    49.3  median=    61.0
+    Pigeons             : mean=    26.4  std=    19.4  median=    21.5
+    Songbirds           : mean=    35.9  std=    25.9  median=    28.0
+    Waders              : mean=    57.2  std=    44.6  median=    40.5 ◄ WEAK
+
+============================================================
+5. RUNNING CV TO GET CONFUSION PATTERNS
+============================================================
+  Training 5-fold quick model (no trajectory features for speed)...
+  Fold 1/5 done
+  Fold 2/5 done
+  Fold 3/5 done
+  Fold 4/5 done
+  Fold 5/5 done
+
+  CONFUSION MATRIX (rows=true, cols=predicted):
+  Which classes do the weak ones get confused with?
+
+  Normalized (% of true class → predicted):
+
+               Birds of Prey  Clutter  Cormorants  Ducks  Geese  Gulls  Pigeons  Songbirds  Waders
+Birds of Prey           38.0      2.8         0.0    0.9    0.0   44.4      0.0       13.9     0.0
+Clutter                  1.2     67.9         1.2    1.2    0.0   17.9      0.0       10.7     0.0
+Cormorants               0.0      0.0        17.5    0.0   10.0   52.5      0.0       20.0     0.0
+Ducks                    0.0      5.2         0.0   44.8    6.9   15.5      5.2       13.8     8.6
+Geese                    0.0      1.2         3.6    1.2   31.3   44.6      2.4        9.6     6.0
+Gulls                    2.5      0.4         0.8    0.9    1.2   83.4      0.7        6.9     3.3
+Pigeons                  0.0      0.8         0.0    1.6    0.0   10.7     73.0       13.1     0.8
+Songbirds                4.8      1.2         0.6    1.7    2.1   23.2      3.5       61.1     1.9
+Waders                   1.7      1.7         0.0    5.8    9.2   47.5      0.0        8.3    25.8
+
+  Cormorants (correct: 17.5%):
+    → misclassified as Gulls: 52.5%
+    → misclassified as Songbirds: 20.0%
+    → misclassified as Geese: 10.0%
+
+  Waders (correct: 25.8%):
+    → misclassified as Gulls: 47.5%
+    → misclassified as Geese: 9.2%
+    → misclassified as Songbirds: 8.3%
+
+  Geese (correct: 31.3%):
+    → misclassified as Gulls: 44.6%
+    → misclassified as Songbirds: 9.6%
+    → misclassified as Waders: 6.0%
+
+============================================================
+6. DEBUG SUBMISSION CSV FOR BIRD-RADAR-VISUALISATION
+============================================================
+  Saved debug_weak_classes_submission.csv (2601 rows)
+  Debug columns: predicted_class, true_class, correct, max_prob, is_weak_class, is_misclassified_weak
