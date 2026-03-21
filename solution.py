@@ -1,6 +1,6 @@
 """
 AI Cup 2026 — Bird Radar Track Classification
-Trains a LightGBM model with group-aware CV, generates submission.csv.
+Two-stage classifier: binary Gull detector + ensembled 8-class non-Gull classifier.
 """
 
 import argparse
@@ -21,6 +21,7 @@ from imblearn.over_sampling import SMOTENC, RandomOverSampler
 from imblearn.combine import SMOTETomek
 from sklearn.model_selection import ParameterGrid
 from catboost import CatBoostClassifier
+import mlflow
 
 # ─────────────────────────────────────────────
 # CLI Arguments
@@ -42,14 +43,10 @@ parser.add_argument('--boost-geese', type=float, default=0, metavar='MULT',
                     help='Override boost multiplier for Geese (default: use --boost-weak)')
 parser.add_argument('--grid-search', action='store_true',
                     help='Run grid search over hyperparameters (slow)')
-parser.add_argument('--ensemble', action='store_true', default=True,
-                    help='Ensemble LightGBM + CatBoost (simple average, default: on)')
-parser.add_argument('--no-ensemble', dest='ensemble', action='store_false',
-                    help='Disable CatBoost ensemble')
-parser.add_argument('--two-stage', action='store_true', default=True,
-                    help='Two-stage: binary Gull detector + 8-class non-Gull classifier (default: on)')
-parser.add_argument('--no-two-stage', dest='two_stage', action='store_false',
-                    help='Disable two-stage Gull detector')
+parser.add_argument('--stage1-catboost', action='store_true',
+                    help='Use CatBoost instead of LightGBM for Stage 1 binary Gull classifier')
+parser.add_argument('--no-mlflow', action='store_true',
+                    help='Disable MLflow experiment tracking')
 parser.add_argument('--dataset', choices=['knmi', 'openmeteo', 'all'], default='openmeteo',
                     help='Weather dataset to use (default: openmeteo)')
 parser.add_argument('--gull-threshold', type=float, default=0.5, metavar='T',
@@ -502,7 +499,32 @@ pipeline = ImbPipeline([
 ])
 
 # ─────────────────────────────────────────────
-# 7. Group-Aware Cross-Validation + Training
+# 7. Helper: apply boost-weak row duplication
+# ─────────────────────────────────────────────
+def apply_boost(X_arr, y_arr, class_boost):
+    """Duplicate rows for weak classes. Returns (X_boosted, y_boosted)."""
+    if not class_boost:
+        return X_arr, y_arr
+    X_np = X_arr if isinstance(X_arr, np.ndarray) else np.asarray(X_arr)
+    y_np = y_arr if isinstance(y_arr, np.ndarray) else np.asarray(y_arr)
+    extra_X, extra_y = [], []
+    for cls, mult in class_boost.items():
+        repeats = int(mult) - 1
+        if repeats <= 0:
+            continue
+        cls_mask = (y_np == cls)
+        X_cls = X_np[cls_mask]
+        y_cls = y_np[cls_mask]
+        if len(X_cls) > 0:
+            extra_X.extend([X_cls] * repeats)
+            extra_y.extend([y_cls] * repeats)
+    if extra_X:
+        X_np = np.vstack([X_np] + extra_X)
+        y_np = np.concatenate([y_np] + extra_y)
+    return X_np, y_np
+
+# ─────────────────────────────────────────────
+# 8. Two-Stage Cross-Validation + Training
 # ─────────────────────────────────────────────
 n_splits = 10
 groups = train_df['primary_observation_id']
@@ -510,427 +532,214 @@ cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
 split = list(cv.split(X, y, groups))
 
 classes = np.sort(y.unique())
-oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
-test_preds = np.zeros((len(X_test), len(classes)))
-
-def run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult=0, label=""):
-    """Run group-aware CV, return OOF predictions and averaged test predictions."""
-    oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
-    test_preds = np.zeros((len(X_test), len(classes)))
-
-    if label:
-        print(f"\n{label}")
-    print(f"Training {len(split)}-fold StratifiedGroupKFold...")
-
-    for i, (train_idx, val_idx) in enumerate(split):
-        X_train_fold = X.iloc[train_idx]
-        y_train_fold = y.iloc[train_idx]
-        X_val_fold   = X.iloc[val_idx]
-        y_val_fold   = y.iloc[val_idx]
-
-        pipeline_fold = clone(pipeline)
-
-        if boost_weak_mult > 0:
-            # Manually run imputer + oversampler
-            preprocessor = Pipeline([
-                (pipeline_fold.steps[0][0], pipeline_fold.steps[0][1]),  # imputer
-            ])
-            oversampler_step = pipeline_fold.steps[1][1]
-            model_step = pipeline_fold.steps[2][1]
-
-            X_transformed = preprocessor.fit_transform(X_train_fold, y_train_fold)
-            X_val_transformed = preprocessor.transform(X_val_fold)
-            X_test_transformed = preprocessor.transform(X_test)
-
-            if oversampler_step != 'passthrough':
-                X_resampled, y_resampled = oversampler_step.fit_resample(X_transformed, y_train_fold)
-            else:
-                X_resampled, y_resampled = X_transformed, y_train_fold
-
-            # Safe boosting: duplicate rows per class with individual multipliers
-            # This avoids LightGBM C++ GPU crashes with custom float weights
-            X_resampled_np = X_resampled if isinstance(X_resampled, np.ndarray) else X_resampled.values
-            y_resampled_np = y_resampled if isinstance(y_resampled, np.ndarray) else y_resampled.values
-
-            extra_X, extra_y = [], []
-            for cls, mult in CLASS_BOOST.items():
-                repeats = int(mult) - 1
-                if repeats <= 0:
-                    continue
-                if hasattr(y_resampled, 'values'):
-                    cls_mask = (y_resampled == cls).values
-                else:
-                    cls_mask = (y_resampled_np == cls)
-                X_cls = X_resampled_np[cls_mask]
-                y_cls = y_resampled_np[cls_mask]
-                if len(X_cls) > 0:
-                    extra_X.extend([X_cls] * repeats)
-                    extra_y.extend([y_cls] * repeats)
-
-            if extra_X:
-                X_resampled_np = np.vstack([X_resampled_np] + extra_X)
-                y_resampled_np = np.concatenate([y_resampled_np] + extra_y)
-
-            # Increase min_child_samples to avoid degenerate splits from duplicated rows
-            model_step.set_params(min_child_samples=max(10, int(len(X_resampled_np) * 0.01)))
-            model_step.fit(X_resampled_np, y_resampled_np)
-            val_proba = model_step.predict_proba(X_val_transformed)
-            test_proba = model_step.predict_proba(X_test_transformed)
-        else:
-            pipeline_fold.fit(X_train_fold, y_train_fold)
-            val_proba = pipeline_fold.predict_proba(X_val_fold)
-            test_proba = pipeline_fold.predict_proba(X_test)
-
-        oof_preds.iloc[val_idx] = val_proba
-        test_preds += test_proba
-
-        fold_ap = average_precision_score(
-            pd.get_dummies(y_val_fold).reindex(columns=classes, fill_value=0),
-            val_proba, average='macro'
-        )
-        print(f"  Fold {i+1}/{len(split)} — train: {len(train_idx)}, val: {len(val_idx)}, val mAP: {fold_ap:.4f}")
-
-    test_preds /= len(split)
-    return oof_preds, test_preds
-
-
-# ─────────────────────────────────────────────
-# 7b. Grid Search (optional)
-# ─────────────────────────────────────────────
-if args.grid_search:
-    print("\n" + "=" * 50)
-    print("GRID SEARCH MODE")
-    print("=" * 50)
-
-    # Oversampler options for grid search
-    oversampler_options = {
-        'smotenc': SMOTENC(categorical_features=cat_indices, random_state=42),
-        'smotetomek': SMOTETomek(
-            smote=SMOTENC(categorical_features=cat_indices, random_state=42),
-            random_state=42
-        ),
-        'passthrough': 'passthrough',
-    }
-
-    param_grid = {
-        'model__n_estimators': [300, 500, 1000],
-        'model__learning_rate': [0.01, 0.05, 0.1],
-        'model__num_leaves': [31, 63, 127],
-        'oversampler': list(oversampler_options.values()),
-    }
-
-    # Optionally include focal loss in the search
-    if args.focal_loss:
-        param_grid['model__objective'] = ['multiclass', focal_loss_lgb]
-
-    grid = list(ParameterGrid(param_grid))
-    print(f"Total configurations: {len(grid)}")
-
-    best_score = -1
-    best_params = None
-    best_oof = None
-    best_test = None
-
-    for i, params in enumerate(grid):
-        print(f"\n[{i+1}/{len(grid)}] {params}")
-        pipeline.set_params(**params)
-        oof, t_preds = run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult)
-
-        # Evaluate
-        solution_df = (
-            train_df.reset_index()
-            .groupby(["track_id", "bird_group"]).size()
-            .unstack(fill_value=0)
-        )
-        oof_aligned = oof.loc[solution_df.index, solution_df.columns]
-        needed_columns = [
-            "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
-            "Gulls", "Birds of Prey", "Waders", "Songbirds",
-        ]
-        s = average_precision_score(solution_df[needed_columns], oof_aligned[needed_columns], average='macro')
-        print(f"  → mAP: {s:.4f}")
-
-        if s > best_score:
-            best_score = s
-            best_params = params
-            best_oof = oof
-            best_test = t_preds
-
-    print(f"\n{'='*50}")
-    print(f"Best mAP: {best_score:.4f}")
-    print(f"Best params: {best_params}")
-    print(f"{'='*50}")
-
-    oof_preds = best_oof
-    test_preds = best_test
-
-else:
-    # ── Single run ──
-    oof_preds, test_preds = run_cv(pipeline, X, y, split, classes, X_test, boost_weak_mult)
-
-# ─────────────────────────────────────────────
-# 7c. CatBoost Ensemble (optional)
-# ─────────────────────────────────────────────
-if args.ensemble:
-    print("\n" + "=" * 50)
-    print("CATBOOST ENSEMBLE")
-    print("=" * 50)
-
-    # After ColumnTransformer, numeric cols come first, then cat cols
-    cb_cat_idx = [len(numeric_features) + i for i in range(len(categorical_features))]
-
-    cb_params = dict(
-        iterations=1000,
-        learning_rate=0.05,
-        depth=8,
-        l2_leaf_reg=3,
-        auto_class_weights='Balanced',
-        random_seed=42,
-        task_type='GPU',
-        verbose=0,
-    )
-
-    cb_oof = pd.DataFrame(0.0, index=X.index, columns=classes)
-    cb_test = np.zeros((len(X_test), len(classes)))
-
-    # CatBoost needs categoricals as strings, not ordinal-encoded floats
-    cb_imputer = ColumnTransformer([
-        ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
-        ('cat_imputer', Pipeline([
-            ('impute', SimpleImputer(strategy='most_frequent')),
-        ]), categorical_features)
-    ])
-
-    print(f"Training {len(split)}-fold CatBoost...")
-    for i, (train_idx, val_idx) in enumerate(split):
-        X_train_fold = X.iloc[train_idx]
-        y_train_fold = y.iloc[train_idx]
-        X_val_fold = X.iloc[val_idx]
-
-        cb_imp = clone(cb_imputer)
-        X_tr = cb_imp.fit_transform(X_train_fold, y_train_fold)
-        X_va = cb_imp.transform(X_val_fold)
-        X_te = cb_imp.transform(X_test)
-
-        # Cast categorical columns to string for CatBoost
-        for ci in cb_cat_idx:
-            X_tr[:, ci] = X_tr[:, ci].astype(str)
-            X_va[:, ci] = X_va[:, ci].astype(str)
-            X_te[:, ci] = X_te[:, ci].astype(str)
-
-        cb = CatBoostClassifier(**cb_params)
-        cb.fit(X_tr, y_train_fold, eval_set=(X_va, y.iloc[val_idx]),
-               early_stopping_rounds=50, cat_features=cb_cat_idx)
-
-        val_proba = cb.predict_proba(X_va)
-        test_proba = cb.predict_proba(X_te)
-
-        cb_oof.iloc[val_idx] = val_proba
-        cb_test += test_proba
-
-        fold_ap = average_precision_score(
-            pd.get_dummies(y.iloc[val_idx]).reindex(columns=classes, fill_value=0),
-            val_proba, average='macro'
-        )
-        print(f"  Fold {i+1}/{len(split)} — val mAP: {fold_ap:.4f}")
-
-    cb_test /= len(split)
-
-    # Print CatBoost standalone score
-    solution_df_tmp = (
-        train_df.reset_index()
-        .groupby(["track_id", "bird_group"]).size()
-        .unstack(fill_value=0)
-    )
-    needed_columns_tmp = [
-        "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
-        "Gulls", "Birds of Prey", "Waders", "Songbirds",
-    ]
-    cb_oof_aligned = cb_oof.loc[solution_df_tmp.index, solution_df_tmp.columns]
-    cb_map = average_precision_score(
-        solution_df_tmp[needed_columns_tmp],
-        cb_oof_aligned[needed_columns_tmp],
-        average='macro'
-    )
-    print(f"\n  CatBoost standalone mAP: {cb_map:.4f}")
-
-    # Simple average ensemble
-    oof_preds = (oof_preds + cb_oof) / 2
-    test_preds = (test_preds + cb_test) / 2
-    print("  Ensembled LightGBM + CatBoost (simple average)")
-
-# ─────────────────────────────────────────────
-# 7d. Two-Stage Gull Detector (optional)
-# ─────────────────────────────────────────────
-if args.two_stage:
-    print("\n" + "=" * 50)
-    print("TWO-STAGE GULL DETECTOR")
-    print("=" * 50)
-
-    non_gull_classes = np.sort([c for c in classes if c != 'Gulls'])
-
-    # Stage 1: Binary Gull vs non-Gull
-    y_binary = (y == 'Gulls').astype(int)
-
-    lgb_binary = LGBMClassifier(
-        n_estimators=1000, learning_rate=0.05, num_leaves=63,
-        min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
-        class_weight='balanced', random_state=42, n_jobs=-1,
-        device='gpu', verbose=-1,
-    )
-    binary_pipeline = ImbPipeline([
-        ('imputer', clone(imputer)),
-        ('oversampler', 'passthrough'),
-        ('model', lgb_binary)
-    ])
-
-    # Stage 2: 8-class on non-Gull samples only
-    lgb_multi = LGBMClassifier(
-        n_estimators=1000, learning_rate=0.05, num_leaves=63,
-        min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
-        class_weight='balanced', random_state=42, n_jobs=-1,
-        device='gpu', verbose=-1,
-    )
-    multi_pipeline = ImbPipeline([
-        ('imputer', clone(imputer)),
-        ('oversampler', 'passthrough'),
-        ('model', lgb_multi)
-    ])
-
-    ts_oof = pd.DataFrame(0.0, index=X.index, columns=classes)
-    ts_test = np.zeros((len(X_test), len(classes)))
-
-    gull_thresh = args.gull_threshold
-    us_gulls = args.undersample_gulls
-    if gull_thresh != 0.5:
-        print(f"  Gull threshold: {gull_thresh} (raw p(Gull) must exceed this to count as Gull)")
-    if us_gulls > 0:
-        print(f"  Undersampling Gulls to {us_gulls} tracks per fold")
-
-    print(f"Training {len(split)}-fold two-stage...")
-    for i, (train_idx, val_idx) in enumerate(split):
-        X_tr = X.iloc[train_idx]
-        X_va = X.iloc[val_idx]
-        y_tr = y.iloc[train_idx]
-        y_va = y.iloc[val_idx]
-
-        # ── Optional: undersample Gulls in training set ──
-        if us_gulls > 0:
-            gull_mask = y_tr == 'Gulls'
-            gull_indices = y_tr.index[gull_mask]
-            non_gull_indices = y_tr.index[~gull_mask]
-            n_gulls = len(gull_indices)
-            if n_gulls > us_gulls:
-                rng = np.random.RandomState(42 + i)
-                keep = rng.choice(gull_indices, size=us_gulls, replace=False)
-                keep_idx = np.concatenate([keep, non_gull_indices.values])
-                X_tr = X_tr.loc[keep_idx]
-                y_tr = y_tr.loc[keep_idx]
-
-        # ── Stage 1: Gull binary ──
-        y_tr_bin = (y_tr == 'Gulls').astype(int)
-        pipe1 = clone(binary_pipeline)
-        pipe1.fit(X_tr, y_tr_bin)
-        # p(Gull) is column index 1
-        val_p_gull_raw = pipe1.predict_proba(X_va)[:, 1]
-        test_p_gull_raw = pipe1.predict_proba(X_test)[:, 1]
-
-        # ── Asymmetric threshold: re-calibrate p(Gull) ──
-        if gull_thresh != 0.5:
-            # We want to maintain strict monotonic ranking. 
-            # If threshold is high (e.g. 0.8), we heavily suppress anything below it.
-            # Using exponentiation smoothly squashes probabilities without breaking rankings.
-            # Example: penalty maps threshold -> 0.5
-            gamma = np.log(0.5) / np.log(gull_thresh)
-            val_p_gull = np.power(val_p_gull_raw, gamma)
-            test_p_gull = np.power(test_p_gull_raw, gamma)
-        else:
-            val_p_gull = val_p_gull_raw
-            test_p_gull = test_p_gull_raw
-
-        # ── Stage 2: non-Gull multi-class ──
-        non_gull_mask = y_tr != 'Gulls'
-        X_tr_ng = X_tr[non_gull_mask]
-        y_tr_ng = y_tr[non_gull_mask]
-
-        pipe2 = clone(multi_pipeline)
-        pipe2.fit(X_tr_ng, y_tr_ng)
-        # Get class order from fitted model
-        s2_classes = pipe2.classes_
-
-        val_p_rest = pipe2.predict_proba(X_va)
-        test_p_rest = pipe2.predict_proba(X_test)
-
-        # ── Combine: p(class) = (1 - p_gull) * p(class | non-gull) ──
-        val_combined = np.zeros((len(X_va), len(classes)))
-        test_combined = np.zeros((len(X_test), len(classes)))
-
-        gull_idx = list(classes).index('Gulls')
-        val_combined[:, gull_idx] = val_p_gull
-        test_combined[:, gull_idx] = test_p_gull
-
-        for j, cls in enumerate(s2_classes):
-            cls_idx = list(classes).index(cls)
-            val_combined[:, cls_idx] = (1 - val_p_gull) * val_p_rest[:, j]
-            test_combined[:, cls_idx] = (1 - test_p_gull) * test_p_rest[:, j]
-
-        ts_oof.iloc[val_idx] = val_combined
-        ts_test += test_combined
-
-        fold_ap = average_precision_score(
-            pd.get_dummies(y_va).reindex(columns=classes, fill_value=0),
-            val_combined, average='macro'
-        )
-        print(f"  Fold {i+1}/{len(split)} — val mAP: {fold_ap:.4f}")
-
-    ts_test /= len(split)
-
-    # Print two-stage standalone score
-    solution_df_ts = (
-        train_df.reset_index()
-        .groupby(["track_id", "bird_group"]).size()
-        .unstack(fill_value=0)
-    )
-    needed_ts = [
-        "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
-        "Gulls", "Birds of Prey", "Waders", "Songbirds",
-    ]
-    ts_oof_aligned = ts_oof.loc[solution_df_ts.index, solution_df_ts.columns]
-    ts_map = average_precision_score(
-        solution_df_ts[needed_ts], ts_oof_aligned[needed_ts], average='macro'
-    )
-    print(f"\n  Two-stage standalone mAP: {ts_map:.4f}")
-
-    # Print per-class for comparison
-    print("  Per-class AP (two-stage):")
-    for cls in needed_ts:
-        if cls in solution_df_ts.columns:
-            ap = average_precision_score(solution_df_ts[cls], ts_oof_aligned[cls])
-            print(f"    {cls:20s}: {ap:.4f}")
-
-    # Average two-stage with existing predictions
-    oof_preds = (oof_preds + ts_oof) / 2
-    test_preds = (test_preds + ts_test) / 2
-    print("\n  Ensembled with base model (simple average)")
-
-# ─────────────────────────────────────────────
-# 8. Evaluation
-# ─────────────────────────────────────────────
 needed_columns = [
     "Clutter", "Cormorants", "Pigeons", "Ducks", "Geese",
     "Gulls", "Birds of Prey", "Waders", "Songbirds",
 ]
 
-# Build ground-truth OOF solution
+# CatBoost setup (used in Stage 2 always, and Stage 1 with --stage1-catboost)
+cb_cat_idx = [len(numeric_features) + i for i in range(len(categorical_features))]
+cb_params = dict(
+    iterations=1000, learning_rate=0.05, depth=8, l2_leaf_reg=3,
+    auto_class_weights='Balanced', random_seed=42, task_type='GPU', verbose=0,
+)
+cb_imputer = ColumnTransformer([
+    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+    ('cat_imputer', Pipeline([
+        ('impute', SimpleImputer(strategy='most_frequent')),
+    ]), categorical_features)
+])
+
+# Stage 1 model setup
+if args.stage1_catboost:
+    print("Stage 1 (Gull binary): CatBoost")
+else:
+    print("Stage 1 (Gull binary): LightGBM")
+print("Stage 2 (non-Gull 8-class): LightGBM + CatBoost ensemble")
+
+gull_thresh = args.gull_threshold
+us_gulls = args.undersample_gulls
+if gull_thresh != 0.5:
+    print(f"  Gull threshold: {gull_thresh}")
+if us_gulls > 0:
+    print(f"  Undersampling Gulls to {us_gulls} tracks per fold")
+
+# MLflow setup
+use_mlflow = not args.no_mlflow
+if use_mlflow:
+    mlflow.set_tracking_uri("file:./mlruns")
+    mlflow.set_experiment("bird-radar-classification")
+    run = mlflow.start_run()
+    mlflow.log_params({
+        'dataset': args.dataset,
+        'stage1_model': 'catboost' if args.stage1_catboost else 'lightgbm',
+        'gull_threshold': gull_thresh,
+        'undersample_gulls': us_gulls,
+        'boost_weak': args.boost_weak,
+        'n_splits': n_splits,
+        'n_features': X.shape[1],
+        'focal_loss': args.focal_loss,
+        'oversampler': 'smotetomek' if args.smotetomek else ('passthrough' if args.passthrough else 'smotenc'),
+    })
+
+oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
+test_preds = np.zeros((len(X_test), len(classes)))
+
+print(f"\nTraining {len(split)}-fold two-stage pipeline...")
+for i, (train_idx, val_idx) in enumerate(split):
+    X_tr = X.iloc[train_idx]
+    X_va = X.iloc[val_idx]
+    y_tr = y.iloc[train_idx]
+    y_va = y.iloc[val_idx]
+
+    # ── Optional: undersample Gulls in training set ──
+    if us_gulls > 0:
+        gull_mask = y_tr == 'Gulls'
+        gull_indices = y_tr.index[gull_mask]
+        non_gull_indices = y_tr.index[~gull_mask]
+        if len(gull_indices) > us_gulls:
+            rng = np.random.RandomState(42 + i)
+            keep = rng.choice(gull_indices, size=us_gulls, replace=False)
+            keep_idx = np.concatenate([keep, non_gull_indices.values])
+            X_tr = X_tr.loc[keep_idx]
+            y_tr = y_tr.loc[keep_idx]
+
+    # ════════════════════════════════════════════
+    # STAGE 1: Binary Gull vs Non-Gull
+    # ════════════════════════════════════════════
+    y_tr_bin = (y_tr == 'Gulls').astype(int)
+
+    if args.stage1_catboost:
+        cb_imp1 = clone(cb_imputer)
+        X_tr_cb = cb_imp1.fit_transform(X_tr, y_tr_bin)
+        X_va_cb = cb_imp1.transform(X_va)
+        X_te_cb = cb_imp1.transform(X_test)
+        for ci in cb_cat_idx:
+            X_tr_cb[:, ci] = X_tr_cb[:, ci].astype(str)
+            X_va_cb[:, ci] = X_va_cb[:, ci].astype(str)
+            X_te_cb[:, ci] = X_te_cb[:, ci].astype(str)
+        cb1_params = {**cb_params, 'loss_function': 'Logloss'}
+        cb1 = CatBoostClassifier(**cb1_params)
+        cb1.fit(X_tr_cb, y_tr_bin, eval_set=(X_va_cb, y_va.map(lambda x: 1 if x == 'Gulls' else 0)),
+                early_stopping_rounds=50, cat_features=cb_cat_idx)
+        val_p_gull_raw = cb1.predict_proba(X_va_cb)[:, 1]
+        test_p_gull_raw = cb1.predict_proba(X_te_cb)[:, 1]
+    else:
+        lgb_binary = LGBMClassifier(
+            n_estimators=1000, learning_rate=0.05, num_leaves=63,
+            min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
+            class_weight='balanced', random_state=42, n_jobs=-1,
+            device='gpu', verbose=-1,
+        )
+        pipe1 = ImbPipeline([
+            ('imputer', clone(imputer)),
+            ('oversampler', 'passthrough'),
+            ('model', lgb_binary)
+        ])
+        pipe1.fit(X_tr, y_tr_bin)
+        val_p_gull_raw = pipe1.predict_proba(X_va)[:, 1]
+        test_p_gull_raw = pipe1.predict_proba(X_test)[:, 1]
+
+    # Asymmetric threshold recalibration (monotonic power transform)
+    if gull_thresh != 0.5:
+        gamma = np.log(0.5) / np.log(gull_thresh)
+        val_p_gull = np.power(val_p_gull_raw, gamma)
+        test_p_gull = np.power(test_p_gull_raw, gamma)
+    else:
+        val_p_gull = val_p_gull_raw
+        test_p_gull = test_p_gull_raw
+
+    # ════════════════════════════════════════════
+    # STAGE 2: 8-class Non-Gull (LightGBM + CatBoost ensemble)
+    # ════════════════════════════════════════════
+    non_gull_mask = y_tr != 'Gulls'
+    X_tr_ng = X_tr[non_gull_mask]
+    y_tr_ng = y_tr[non_gull_mask]
+
+    # ── Stage 2a: LightGBM with oversampling + boost-weak ──
+    lgb_imp = clone(imputer)
+    X_tr_ng_imp = lgb_imp.fit_transform(X_tr_ng, y_tr_ng)
+    X_va_imp = lgb_imp.transform(X_va)
+    X_te_imp = lgb_imp.transform(X_test)
+
+    if oversampler != 'passthrough':
+        os_step = clone(oversampler)
+        X_ng_res, y_ng_res = os_step.fit_resample(X_tr_ng_imp, y_tr_ng)
+    else:
+        X_ng_res, y_ng_res = X_tr_ng_imp, y_tr_ng
+
+    X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
+
+    lgb_s2 = LGBMClassifier(**lgb_params)
+    lgb_s2.set_params(min_child_samples=max(10, int(len(X_ng_res) * 0.01)))
+    lgb_s2.fit(X_ng_res, y_ng_res)
+    lgb_val_proba = lgb_s2.predict_proba(X_va_imp)
+    lgb_test_proba = lgb_s2.predict_proba(X_te_imp)
+    s2_classes = lgb_s2.classes_
+
+    # ── Stage 2b: CatBoost ──
+    cb_imp2 = clone(cb_imputer)
+    X_tr_ng_cb = cb_imp2.fit_transform(X_tr_ng, y_tr_ng)
+    X_va_cb2 = cb_imp2.transform(X_va)
+    X_te_cb2 = cb_imp2.transform(X_test)
+    for ci in cb_cat_idx:
+        X_tr_ng_cb[:, ci] = X_tr_ng_cb[:, ci].astype(str)
+        X_va_cb2[:, ci] = X_va_cb2[:, ci].astype(str)
+        X_te_cb2[:, ci] = X_te_cb2[:, ci].astype(str)
+
+    cb_s2 = CatBoostClassifier(**cb_params)
+    cb_s2.fit(X_tr_ng_cb, y_tr_ng,
+              cat_features=cb_cat_idx)
+    cb_val_proba = cb_s2.predict_proba(X_va_cb2)
+    cb_test_proba = cb_s2.predict_proba(X_te_cb2)
+
+    # Align CatBoost classes to LightGBM class order
+    cb_s2_classes = cb_s2.classes_
+    if not np.array_equal(cb_s2_classes, s2_classes):
+        cb_reorder = [list(cb_s2_classes).index(c) for c in s2_classes]
+        cb_val_proba = cb_val_proba[:, cb_reorder]
+        cb_test_proba = cb_test_proba[:, cb_reorder]
+
+    # ── Stage 2 ensemble: simple average ──
+    val_p_rest = (lgb_val_proba + cb_val_proba) / 2
+    test_p_rest = (lgb_test_proba + cb_test_proba) / 2
+
+    # ════════════════════════════════════════════
+    # COMBINE: p(Gull) from Stage 1, p(other) from Stage 2
+    # ════════════════════════════════════════════
+    val_combined = np.zeros((len(X_va), len(classes)))
+    test_combined = np.zeros((len(X_test), len(classes)))
+
+    gull_idx = list(classes).index('Gulls')
+    val_combined[:, gull_idx] = val_p_gull
+    test_combined[:, gull_idx] = test_p_gull
+
+    for j, cls in enumerate(s2_classes):
+        cls_idx = list(classes).index(cls)
+        val_combined[:, cls_idx] = (1 - val_p_gull) * val_p_rest[:, j]
+        test_combined[:, cls_idx] = (1 - test_p_gull) * test_p_rest[:, j]
+
+    oof_preds.iloc[val_idx] = val_combined
+    test_preds += test_combined
+
+    fold_ap = average_precision_score(
+        pd.get_dummies(y_va).reindex(columns=classes, fill_value=0),
+        val_combined, average='macro'
+    )
+    print(f"  Fold {i+1}/{len(split)} — val mAP: {fold_ap:.4f}")
+    if use_mlflow:
+        mlflow.log_metric(f"fold_mAP", fold_ap, step=i)
+
+test_preds /= len(split)
+
+# ─────────────────────────────────────────────
+# 9. Evaluation
+# ─────────────────────────────────────────────
 solution_df = (
-    train_df
-    .reset_index()
-    .groupby(["track_id", "bird_group"])
-    .size()
+    train_df.reset_index()
+    .groupby(["track_id", "bird_group"]).size()
     .unstack(fill_value=0)
 )
-
-# Align OOF predictions to solution_df
 oof_aligned = oof_preds.loc[solution_df.index, solution_df.columns]
 
 overall_map = average_precision_score(
@@ -943,13 +752,20 @@ print(f"\n{'='*50}")
 print(f" OOF Macro-Averaged AP (mAP): {overall_map:.4f}")
 print(f"{'='*50}")
 print("\n Per-Class Average Precision:")
+per_class_ap = {}
 for cls in needed_columns:
     if cls in solution_df.columns and cls in oof_aligned.columns:
         ap = average_precision_score(solution_df[cls], oof_aligned[cls])
+        per_class_ap[cls] = ap
         print(f"   {cls:20s}: {ap:.4f}")
 
+if use_mlflow:
+    mlflow.log_metric("overall_mAP", overall_map)
+    for cls, ap in per_class_ap.items():
+        mlflow.log_metric(f"AP_{cls.replace(' ', '_')}", ap)
+
 # ─────────────────────────────────────────────
-# 9. Generate Submission
+# 10. Generate Submission
 # ─────────────────────────────────────────────
 submission_df = pd.DataFrame(
     test_preds,
@@ -959,3 +775,8 @@ submission_df = pd.DataFrame(
 submission_df.index.name = 'track_id'
 submission_df.to_csv('submission.csv')
 print(f"\nSaved submission.csv ({len(submission_df)} rows)")
+
+if use_mlflow:
+    mlflow.log_artifact('submission.csv')
+    mlflow.end_run()
+    print("MLflow run logged.")

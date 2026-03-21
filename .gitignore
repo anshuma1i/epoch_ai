@@ -7,3 +7,4 @@ __pycache__/*
 !dataset/*_with_openmeteo.csv
 .DS_Store
 catboost_info/
+mlruns/
