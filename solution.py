@@ -32,8 +32,8 @@ parser.add_argument('--passthrough', action='store_true',
                     help='Disable oversampling entirely')
 parser.add_argument('--smotetomek', action='store_true',
                     help='Use SMOTETomek (SMOTENC + TomekLinks) instead of SMOTENC-only')
-parser.add_argument('--boost-weak', type=float, default=0, metavar='MULT',
-                    help='Default sample weight multiplier for weak classes. E.g. --boost-weak 3')
+parser.add_argument('--boost-weak', type=float, default=3, metavar='MULT',
+                    help='Default sample weight multiplier for weak classes (default: 3)')
 parser.add_argument('--boost-cormorants', type=float, default=0, metavar='MULT',
                     help='Override boost multiplier for Cormorants (default: use --boost-weak)')
 parser.add_argument('--boost-waders', type=float, default=0, metavar='MULT',
@@ -42,12 +42,16 @@ parser.add_argument('--boost-geese', type=float, default=0, metavar='MULT',
                     help='Override boost multiplier for Geese (default: use --boost-weak)')
 parser.add_argument('--grid-search', action='store_true',
                     help='Run grid search over hyperparameters (slow)')
-parser.add_argument('--ensemble', action='store_true',
-                    help='Ensemble LightGBM + CatBoost (simple average)')
-parser.add_argument('--two-stage', action='store_true',
-                    help='Two-stage: binary Gull detector + 8-class non-Gull classifier')
-parser.add_argument('--dataset', choices=['knmi', 'openmeteo', 'all'], default='knmi',
-                    help='Weather dataset to use (default: knmi)')
+parser.add_argument('--ensemble', action='store_true', default=True,
+                    help='Ensemble LightGBM + CatBoost (simple average, default: on)')
+parser.add_argument('--no-ensemble', dest='ensemble', action='store_false',
+                    help='Disable CatBoost ensemble')
+parser.add_argument('--two-stage', action='store_true', default=True,
+                    help='Two-stage: binary Gull detector + 8-class non-Gull classifier (default: on)')
+parser.add_argument('--no-two-stage', dest='two_stage', action='store_false',
+                    help='Disable two-stage Gull detector')
+parser.add_argument('--dataset', choices=['knmi', 'openmeteo', 'all'], default='openmeteo',
+                    help='Weather dataset to use (default: openmeteo)')
 parser.add_argument('--gull-threshold', type=float, default=0.5, metavar='T',
                     help='Stage-1 threshold for calling Gull (default: 0.5). '
                          'Higher values (e.g. 0.75) penalise Gull predictions.')
@@ -65,6 +69,7 @@ DATASET_CONFIG = {
         'test': 'dataset/test_with_knmi_286.csv',
         'wind_speed_col': 'knmi_286_hourly_mean_wind_speed_mps',
         'wind_speed_obs_col': 'knmi_286_wind_speed_at_observation_mps',
+        'wind_dir_col': 'knmi_286_wind_direction_degrees',
         'wind_unit_factor': 1.0,  # already m/s
         'weather_features': [
             'knmi_286_wind_direction_degrees',
@@ -89,6 +94,7 @@ DATASET_CONFIG = {
         'test': 'dataset/test_with_openmeteo.csv',
         'wind_speed_col': 'openmeteo_wind_speed_10m_kmh',
         'wind_speed_obs_col': 'openmeteo_wind_speed_10m_kmh',
+        'wind_dir_col': 'openmeteo_wind_direction_10m_degrees',
         'wind_unit_factor': 1 / 3.6,  # km/h → m/s
         'weather_features': [
             'openmeteo_air_temperature_2m_c',
@@ -114,6 +120,7 @@ DATASET_CONFIG = {
         'test': 'dataset/test_with_all_weather.csv',
         'wind_speed_col': 'knmi_286_hourly_mean_wind_speed_mps',
         'wind_speed_obs_col': 'knmi_286_wind_speed_at_observation_mps',
+        'wind_dir_col': 'knmi_286_wind_direction_degrees',
         'wind_unit_factor': 1.0,
         'weather_features': [
             # KNMI features
@@ -192,9 +199,13 @@ def trajectory_features(row):
     alts = [c[2] for c in coords] if len(coords[0]) > 2 else [np.nan] * n
     rcs  = [c[3] for c in coords] if len(coords[0]) > 3 else [np.nan] * n
 
+    # Trajectory smoothing (rolling window=3) to reduce radar noise
+    lons_s = pd.Series(lons).rolling(window=3, min_periods=1, center=True).mean().values
+    lats_s = pd.Series(lats).rolling(window=3, min_periods=1, center=True).mean().values
+
     # Horizontal displacement (degrees → approx metres at ~53°N)
-    dx = np.diff(lons) * 71000
-    dy = np.diff(lats) * 111000
+    dx = np.diff(lons_s) * 71000
+    dy = np.diff(lats_s) * 111000
     step_dist = np.sqrt(dx**2 + dy**2)
     total_dist = step_dist.sum() if len(step_dist) > 0 else 0.0
 
@@ -203,12 +214,24 @@ def trajectory_features(row):
     bearing_changes = np.abs(np.diff(bearings)) if len(bearings) > 1 else np.array([0.0])
     bearing_changes = np.minimum(bearing_changes, 2 * np.pi - bearing_changes)
 
+    # Sharp turn ratio: fraction of turns > 45 degrees
+    sharp_turn_ratio = (bearing_changes > np.pi / 4).mean() if len(bearing_changes) > 0 else 0.0
+
     # Straightness index: displacement / total path length
     displacement = np.sqrt(
         ((lons[-1] - lons[0]) * 71000) ** 2 +
         ((lats[-1] - lats[0]) * 111000) ** 2
     )
     straightness = displacement / (total_dist + 1e-6) if total_dist > 0 else 0.0
+
+    # Sinuosity: total path / displacement (inverse of straightness, penalizes wound tracks)
+    sinuosity = total_dist / (displacement + 1e-6)
+
+    # Track heading (overall direction from start to end)
+    track_heading_rad = np.arctan2(
+        (lats[-1] - lats[0]) * 111000,
+        (lons[-1] - lons[0]) * 71000
+    )
 
     # Altitude change features
     alt_arr = np.array(alts, dtype=float)
@@ -241,7 +264,12 @@ def trajectory_features(row):
         'rcs_range':      rcs_range,
         'tortuosity':     bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
         'tortuosity_max': bearing_changes.max()  if len(bearing_changes) > 0 else 0.0,
+        'sharp_turn_ratio':   sharp_turn_ratio,
         'straightness':       straightness,
+        'sinuosity':          sinuosity,
+        'lon_mean':           np.mean(lons),
+        'lat_mean':           np.mean(lats),
+        'track_heading_rad':  track_heading_rad,
         'alt_climb_rate':     alt_climb_rate,
         'alt_descent_rate':   alt_descent_rate,
         'alt_variability':    alt_variability,
@@ -327,6 +355,25 @@ train_df = train_df.join(train_df.apply(trajectory_features, axis=1))
 print("Extracting trajectory features for test_df...")
 test_df = test_df.join(test_df.apply(trajectory_features, axis=1))
 
+# Post-trajectory interaction features (depend on trajectory-derived columns)
+for df in [train_df, test_df]:
+    # RCS-to-speed ratio: large slow blob (flock) vs fast large bird
+    df['rcs_speed_ratio'] = df['rcs_mean'] / (df['airspeed'] + 1e-6)
+
+    # Altitude-adjusted wind speed (Hellmann power law, exponent 0.143 for open terrain)
+    wf = ds['wind_unit_factor']
+    df['alt_adjusted_wind_speed'] = (
+        df[ds['wind_speed_col']] * wf
+        * np.power(np.maximum(df['alt_mean'], 10) / 10.0, 0.143)
+    )
+
+    # True tailwind & crosswind from track heading vs wind direction
+    wind_dir_rad = np.deg2rad(df[ds['wind_dir_col']])
+    heading = df['track_heading_rad']
+    angle_diff = wind_dir_rad - heading
+    df['true_tailwind_component'] = df['alt_adjusted_wind_speed'] * np.cos(angle_diff)
+    df['true_crosswind_component'] = np.abs(df['alt_adjusted_wind_speed'] * np.sin(angle_diff))
+
 # ─────────────────────────────────────────────
 # 4. Feature List
 # ─────────────────────────────────────────────
@@ -336,14 +383,17 @@ base_features = [
     'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
     'alt_range', 'airspeed_per_m',
     'headwind_component', 'airspeed_wind_ratio',
+    'rcs_speed_ratio', 'alt_adjusted_wind_speed',
+    'true_tailwind_component', 'true_crosswind_component',
 ]
 
 trajectory_feats = [
     'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
     'lon_range', 'lat_range', 'alt_mean', 'alt_std',
     'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'rcs_range',
-    'tortuosity', 'tortuosity_max',
-    'straightness',
+    'tortuosity', 'tortuosity_max', 'sharp_turn_ratio',
+    'straightness', 'sinuosity',
+    'lon_mean', 'lat_mean', 'track_heading_rad',
     'alt_climb_rate', 'alt_descent_rate', 'alt_variability',
     'speed_mean', 'speed_std', 'speed_max', 'speed_cv',
     'accel_mean', 'accel_std',
