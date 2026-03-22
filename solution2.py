@@ -441,9 +441,9 @@ categorical_features = ['radar_bird_size']
 cat_indices = [len(numeric_features) + i for i in range(len(categorical_features))]
 
 imputer = ColumnTransformer([
-    ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+    ('num_imputer', SimpleImputer(strategy='median', keep_empty_features=True), numeric_features),
     ('cat_imputer', Pipeline([
-        ('impute', SimpleImputer(strategy='most_frequent')),
+        ('impute', SimpleImputer(strategy='most_frequent', keep_empty_features=True)),
         ('encode', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))
     ]), categorical_features)
 ])
@@ -773,9 +773,9 @@ if args.ensemble:
 
     # CatBoost needs categoricals as strings, not ordinal-encoded floats
     cb_imputer = ColumnTransformer([
-        ('num_imputer', SimpleImputer(strategy='median'), numeric_features),
+        ('num_imputer', SimpleImputer(strategy='median', keep_empty_features=True), numeric_features),
         ('cat_imputer', Pipeline([
-            ('impute', SimpleImputer(strategy='most_frequent')),
+            ('impute', SimpleImputer(strategy='most_frequent', keep_empty_features=True)),
         ]), categorical_features)
     ])
 
