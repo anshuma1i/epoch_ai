@@ -1,0 +1,269 @@
+[2026-03-23 03:13:58] START D_tide_all_pack_on tide=tide_all pack=True
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/deprecation.py:151: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:484: FutureWarning: `BaseEstimator._check_n_features` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_n_features` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/base.py:493: FutureWarning: `BaseEstimator._check_feature_names` is deprecated in 1.6 and will be removed in 1.7. Use `sklearn.utils.validation._check_feature_names` instead.
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+/Users/anshumalimehta/Projects/epoch_ai/.venv/lib/python3.9/site-packages/sklearn/utils/validation.py:2739: UserWarning: X does not have valid feature names, but LGBMClassifier was fitted with feature names
+  warnings.warn(
+Loading openmeteo_tide dataset...
+  train file: dataset/train_with_openmeteo_tide.csv
+  test file:  dataset/test_with_openmeteo_tide.csv
+Train: (2601, 42), Test: (1872, 35)
+Assumption: tide features were pre-merged using nearest merge_asof with ~10-15 min tolerance.
+Assumption: tide columns (tide_water_level_cm_nap, tide_delta_10min, rising_tide_flag) are present.
+Extracting trajectory features for train_df...
+Extracting trajectory features for test_df...
+Tide ablation mode: tide_all
+Selected weather features: 19
+Metadata interaction pack [pack_v1] active features (8): ['tide_hour_sin', 'tide_hour_cos', 'tide_delta_hour_sin', 'tide_delta_hour_cos', 'headwind_tide_delta', 'gustiness_tide_delta', 'rising_night_interaction', 'precip_tide_motion']
+Feature matrix: X=(2601, 68), X_test=(1872, 68), classes=9
+Oversampler: SMOTENC (default)
+Training 10-fold StratifiedGroupKFold...
+  Fold 1/10 — train: 2356, val: 245, val mAP: 0.7117
+  Fold 2/10 — train: 2313, val: 288, val mAP: 0.7019
+  Fold 3/10 — train: 2333, val: 268, val mAP: 0.6864
+  Fold 4/10 — train: 2348, val: 253, val mAP: 0.5454
+  Fold 5/10 — train: 2325, val: 276, val mAP: 0.6945
+  Fold 6/10 — train: 2353, val: 248, val mAP: 0.7321
+  Fold 7/10 — train: 2351, val: 250, val mAP: 0.5592
+  Fold 8/10 — train: 2316, val: 285, val mAP: 0.5799
+  Fold 9/10 — train: 2353, val: 248, val mAP: 0.5696
+  Fold 10/10 — train: 2361, val: 240, val mAP: 0.7235
+
+==================================================
+CATBOOST ENSEMBLE
+==================================================
+Training 10-fold CatBoost...
+  Fold 1/10 — val mAP: 0.7083
+  Fold 2/10 — val mAP: 0.6759
+  Fold 3/10 — val mAP: 0.6660
+  Fold 4/10 — val mAP: 0.5489
+  Fold 5/10 — val mAP: 0.7796
+  Fold 6/10 — val mAP: 0.7548
+  Fold 7/10 — val mAP: 0.5595
+  Fold 8/10 — val mAP: 0.6073
+  Fold 9/10 — val mAP: 0.5397
+  Fold 10/10 — val mAP: 0.7176
+  CatBoost standalone mAP: 0.6225
+  Ensembled LightGBM + CatBoost (simple average)
+
+==================================================
+TWO-STAGE GULL DETECTOR
+==================================================
+Training 10-fold two-stage...
+  Fold 1/10 — val mAP: 0.7133
+  Fold 2/10 — val mAP: 0.6569
+  Fold 3/10 — val mAP: 0.6398
+  Fold 4/10 — val mAP: 0.5838
+  Fold 5/10 — val mAP: 0.7560
+  Fold 6/10 — val mAP: 0.7115
+  Fold 7/10 — val mAP: 0.5790
+  Fold 8/10 — val mAP: 0.5783
+  Fold 9/10 — val mAP: 0.5512
+  Fold 10/10 — val mAP: 0.7039
+
+  Two-stage standalone mAP: 0.6112
+  Per-class AP (two-stage):
+    Clutter             : 0.8511
+    Cormorants          : 0.2184
+    Pigeons             : 0.8313
+    Ducks               : 0.6257
+    Geese               : 0.4334
+    Gulls               : 0.9429
+    Birds of Prey       : 0.5553
+    Waders              : 0.3228
+    Songbirds           : 0.7197
+
+  Ensembled with base model (simple average)
+
+==================================================
+ OOF Macro-Averaged AP (mAP): 0.6351
+==================================================
+
+ Per-Class Average Precision:
+   Clutter             : 0.8734
+   Cormorants          : 0.2497
+   Pigeons             : 0.8399
+   Ducks               : 0.6699
+   Geese               : 0.4127
+   Gulls               : 0.9432
+   Birds of Prey       : 0.6064
+   Waders              : 0.3649
+   Songbirds           : 0.7563
+
+Saved run_logs/metadata_matrix/D_tide_all_pack_on_submission.csv (1872 rows)
+[2026-03-23 03:21:32] END D_tide_all_pack_on
