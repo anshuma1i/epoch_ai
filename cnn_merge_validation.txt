@@ -1,0 +1,20 @@
+=== Loading Datasets ===
+
+=== Row Count Check ===
+Train: orig=2601, merged=2601, match=True
+Test:  orig=1872,  merged=1872,  match=True
+
+=== track_id Integrity ===
+Train IDs match: True
+Test IDs match:  True
+Train duplicate IDs in merged: 0
+Test duplicate IDs in merged:  0
+
+=== Row Order Integrity ===
+Train row order matches exactly: True
+Test row order matches exactly: True
+
+=== Feature Null Rates (CNN Embeddings) ===
+Found 32 CNN embedding columns in train.
+Train total CNN nulls: 0 / 83232 (0.00%)
+Test total CNN nulls:  0 / 59904 (0.00%)

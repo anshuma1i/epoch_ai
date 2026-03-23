@@ -17,7 +17,7 @@ from sklearn.preprocessing import OrdinalEncoder
 from lightgbm import LGBMClassifier
 import lightgbm as lgb
 from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTENC, RandomOverSampler
+from imblearn.over_sampling import SMOTENC, RandomOverSampler, BorderlineSMOTE, ADASYN
 from imblearn.combine import SMOTETomek
 from sklearn.model_selection import ParameterGrid
 from catboost import CatBoostClassifier
@@ -33,6 +33,9 @@ parser.add_argument('--passthrough', action='store_true',
                     help='Disable oversampling entirely')
 parser.add_argument('--smotetomek', action='store_true',
                     help='Use SMOTETomek (SMOTENC + TomekLinks) instead of SMOTENC-only')
+parser.add_argument('--oversampler', choices=['smotenc', 'borderline', 'adasyn', 'trajectory'],
+                    default='smotenc',
+                    help='Oversampling method: smotenc (default), borderline, adasyn, trajectory')
 parser.add_argument('--boost-weak', type=float, default=3, metavar='MULT',
                     help='Default sample weight multiplier for weak classes (default: 3)')
 parser.add_argument('--boost-cormorants', type=float, default=0, metavar='MULT',
@@ -182,6 +185,102 @@ def parse_trajectory(hex_str):
     except Exception:
         pass
     return []
+
+
+def augment_trajectory_coords(coords, times_list, rng):
+    """Augment trajectory coordinates with jitter, time warp, and rotation."""
+    coords = np.array(coords)
+    lons, lats = coords[:, 0].copy(), coords[:, 1].copy()
+    alts = coords[:, 2].copy() if coords.shape[1] > 2 else None
+    rcs = coords[:, 3].copy() if coords.shape[1] > 3 else None
+
+    # 1. Spatial jitter (σ calibrated to dataset: ~3m for lon/lat, 2m alt, 0.3dB RCS)
+    lons += rng.normal(0, 0.00003, len(lons))
+    lats += rng.normal(0, 0.00003, len(lats))
+    if alts is not None:
+        alts += rng.normal(0, 2.0, len(alts))
+    if rcs is not None:
+        rcs += rng.normal(0, 0.3, len(rcs))
+
+    # 2. Rotation — rotate displacement vectors by random angle
+    angle = rng.uniform(0, 2 * np.pi)
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    lon_c, lat_c = lons.mean(), lats.mean()
+    dlon, dlat = lons - lon_c, lats - lat_c
+    lons = lon_c + dlon * cos_a - dlat * sin_a
+    lats = lat_c + dlon * sin_a + dlat * cos_a
+
+    # 3. Time warp — scale times by ±5%
+    new_times = times_list
+    if times_list is not None and len(times_list) > 0:
+        warp = rng.uniform(0.95, 1.05)
+        new_times = [t * warp for t in times_list]
+
+    new_coords = []
+    for j in range(len(lons)):
+        pt = [lons[j], lats[j]]
+        if alts is not None:
+            pt.append(alts[j])
+        if rcs is not None:
+            pt.append(rcs[j])
+        new_coords.append(tuple(pt))
+
+    return new_coords, new_times
+
+
+def augment_weak_classes(train_df, weak_classes, multiplier, rng):
+    """Augment weak classes by creating trajectory-augmented copies before feature extraction."""
+    from shapely.geometry import LineString
+    aug_rows = []
+    for _, row in train_df.iterrows():
+        if row['bird_group'] not in weak_classes:
+            continue
+        for _ in range(int(multiplier) - 1):
+            coords = parse_trajectory(row['trajectory'])
+            if len(coords) < 2:
+                continue
+            times = row.get('trajectory_time', '')
+            t_list = []
+            if isinstance(times, str) and times.strip():
+                try:
+                    t_list = [float(x) for x in times.strip('[]').split(',')]
+                except ValueError:
+                    pass
+            elif isinstance(times, (list, np.ndarray)):
+                t_list = list(times)
+
+            new_coords, new_times = augment_trajectory_coords(coords, t_list, rng)
+
+            # Shapely LineString supports max 3D — store as (lon, lat, alt),
+            # encode RCS into alt dimension isn't viable, so use original WKB format
+            # by building a 4D-aware WKB manually via struct
+            import struct
+            new_row = row.copy()
+            # Build WKB for 4D LineString (EWKB with Z and M)
+            n_pts = len(new_coords)
+            # Use little-endian, geometry type = LineString with XYZM (0xC0000002)
+            wkb_bytes = struct.pack('<BII', 1, 0xC0000002, n_pts)
+            for pt in new_coords:
+                wkb_bytes += struct.pack('<dddd', pt[0], pt[1],
+                                        pt[2] if len(pt) > 2 else 0.0,
+                                        pt[3] if len(pt) > 3 else 0.0)
+            new_row['trajectory'] = wkb_bytes.hex()
+            if new_times:
+                new_row['trajectory_time'] = str(new_times)
+            for col in ['airspeed', 'min_z', 'max_z']:
+                if col in new_row and pd.notna(new_row[col]) and new_row[col] != 0:
+                    new_row[col] *= (1 + rng.normal(0, 0.01))
+            aug_rows.append(new_row)
+
+    if aug_rows:
+        aug_df = pd.DataFrame(aug_rows)
+        aug_df.index = [f"aug_{i}" for i in range(len(aug_df))]
+        aug_df.index.name = train_df.index.name
+        result = pd.concat([train_df, aug_df])
+        print(f"  Trajectory augmentation: {len(train_df)} → {len(result)} samples "
+              f"(+{len(aug_rows)} augmented from {weak_classes})")
+        return result
+    return train_df
 
 
 def trajectory_features(row):
@@ -362,6 +461,12 @@ for df in [train_df, test_df]:
         df['openmeteo_wind_dir_sin'] = np.sin(2 * np.pi * wd / 360)
         df['openmeteo_wind_dir_cos'] = np.cos(2 * np.pi * wd / 360)
 
+# Trajectory-level augmentation (before feature extraction)
+if args.oversampler == 'trajectory':
+    weak_classes = ['Cormorants', 'Waders', 'Geese']
+    aug_rng = np.random.RandomState(42)
+    train_df = augment_weak_classes(train_df, weak_classes, args.boost_weak, aug_rng)
+
 # Trajectory features
 print("Extracting trajectory features for train_df...")
 train_df = train_df.join(train_df.apply(trajectory_features, axis=1))
@@ -460,15 +565,24 @@ imputer = ColumnTransformer([
 ])
 
 # Oversampler selection
-if args.passthrough:
+if args.passthrough or args.oversampler == 'trajectory':
     oversampler = 'passthrough'
-    print("Oversampler: passthrough (no oversampling)")
+    if args.passthrough:
+        print("Oversampler: passthrough (no oversampling)")
+    else:
+        print("Oversampler: trajectory augmentation (applied before feature extraction)")
 elif args.smotetomek:
     oversampler = SMOTETomek(
         smote=SMOTENC(categorical_features=cat_indices, random_state=42),
         random_state=42
     )
     print("Oversampler: SMOTETomek (SMOTENC + TomekLinks)")
+elif args.oversampler == 'borderline':
+    oversampler = BorderlineSMOTE(random_state=42, kind='borderline-1')
+    print("Oversampler: BorderlineSMOTE")
+elif args.oversampler == 'adasyn':
+    oversampler = ADASYN(random_state=42)
+    print("Oversampler: ADASYN")
 else:
     oversampler = SMOTENC(categorical_features=cat_indices, random_state=42)
     print("Oversampler: SMOTENC (default)")
@@ -609,6 +723,12 @@ for i, (train_idx, val_idx) in enumerate(split):
     y_tr = y.iloc[train_idx]
     y_va = y.iloc[val_idx]
 
+    # Exclude augmented samples from validation (they're copies of training data)
+    if args.oversampler == 'trajectory':
+        va_real = ~X_va.index.astype(str).str.startswith('aug_')
+        X_va = X_va[va_real]
+        y_va = y_va[va_real]
+
     # ── Optional: undersample Gulls in training set ──
     if us_gulls > 0:
         gull_mask = y_tr == 'Gulls'
@@ -685,7 +805,8 @@ for i, (train_idx, val_idx) in enumerate(split):
     else:
         X_ng_res, y_ng_res = X_tr_ng_imp, y_tr_ng
 
-    X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
+    if args.oversampler != 'trajectory':
+        X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
 
     lgb_s2 = LGBMClassifier(**lgb_params)
     lgb_s2.set_params(min_child_samples=max(10, int(len(X_ng_res) * 0.01)))
@@ -737,7 +858,8 @@ for i, (train_idx, val_idx) in enumerate(split):
         val_combined[:, cls_idx] = (1 - val_p_gull) * val_p_rest[:, j]
         test_combined[:, cls_idx] = (1 - test_p_gull) * test_p_rest[:, j]
 
-    oof_preds.iloc[val_idx] = val_combined
+    # Use X_va.index to handle augmented-sample filtering
+    oof_preds.loc[X_va.index] = val_combined
     test_preds += test_combined
 
     fold_ap = average_precision_score(
@@ -753,12 +875,15 @@ test_preds /= len(split)
 # ─────────────────────────────────────────────
 # 9. Evaluation
 # ─────────────────────────────────────────────
+# For evaluation, only use original (non-augmented) samples
+eval_mask = ~train_df.index.astype(str).str.startswith('aug_')
+eval_df = train_df[eval_mask]
 solution_df = (
-    train_df.reset_index()
+    eval_df.reset_index()
     .groupby(["track_id", "bird_group"]).size()
     .unstack(fill_value=0)
 )
-oof_aligned = oof_preds.loc[solution_df.index, solution_df.columns]
+oof_aligned = oof_preds.reindex(solution_df.index).loc[solution_df.index, solution_df.columns]
 
 overall_map = average_precision_score(
     solution_df[needed_columns],
