@@ -364,6 +364,79 @@ def trajectory_features(row):
     # RCS range
     rcs_range = np.nanmax(rcs) - np.nanmin(rcs)
 
+    # ── RCS radar signature features ──
+    rcs_arr = np.array(rcs, dtype=float)
+    rcs_valid = rcs_arr[~np.isnan(rcs_arr)]
+    n_rcs = len(rcs_valid)
+
+    # Group 1: Temporal shape
+    if n_rcs >= 2:
+        rcs_slope = np.polyfit(np.arange(n_rcs), rcs_valid, 1)[0]
+        mid = n_rcs // 2
+        half1_mean = np.mean(rcs_valid[:mid]) if mid > 0 else rcs_valid[0]
+        half2_mean = np.mean(rcs_valid[mid:])
+        rcs_half_ratio = half1_mean / (half2_mean + 1e-6)
+        rcs_centered = rcs_valid - np.mean(rcs_valid)
+        var = np.dot(rcs_centered, rcs_centered)
+        rcs_autocorr_lag1 = np.dot(rcs_centered[:-1], rcs_centered[1:]) / (var + 1e-6)
+        rcs_diff = np.diff(rcs_valid)
+        sign_changes = np.diff(np.sign(rcs_diff))
+        rcs_n_peaks = int(np.sum(sign_changes < 0))
+        rcs_n_valleys = int(np.sum(sign_changes > 0))
+    else:
+        rcs_slope = 0.0
+        rcs_half_ratio = 1.0
+        rcs_autocorr_lag1 = 0.0
+        rcs_n_peaks = 0
+        rcs_n_valleys = 0
+
+    # Group 2: FFT/frequency
+    if n_rcs >= 4:
+        rcs_detrended = rcs_valid - np.mean(rcs_valid)
+        fft_vals = np.fft.rfft(rcs_detrended)
+        fft_power = np.abs(fft_vals) ** 2
+        fft_power_no_dc = fft_power[1:]
+        freqs = np.fft.rfftfreq(n_rcs)[1:]
+        rcs_spectral_energy = np.sum(fft_power_no_dc)
+        if len(fft_power_no_dc) > 0 and rcs_spectral_energy > 0:
+            peak_idx = np.argmax(fft_power_no_dc)
+            rcs_dominant_freq = freqs[peak_idx]
+            rcs_peak_power_ratio = fft_power_no_dc[peak_idx] / (rcs_spectral_energy + 1e-6)
+        else:
+            rcs_dominant_freq = 0.0
+            rcs_peak_power_ratio = 0.0
+    else:
+        rcs_spectral_energy = 0.0
+        rcs_dominant_freq = 0.0
+        rcs_peak_power_ratio = 0.0
+
+    # Group 3: Change-point
+    if n_rcs >= 2:
+        rcs_gradient = np.diff(rcs_valid)
+        rcs_gradient_mean = np.mean(rcs_gradient)
+        rcs_gradient_std = np.std(rcs_gradient)
+        rcs_max_jump = np.max(np.abs(rcs_gradient))
+        rcs_n_jumps_3db = int(np.sum(np.abs(rcs_gradient) > 3.0))
+    else:
+        rcs_gradient_mean = 0.0
+        rcs_gradient_std = 0.0
+        rcs_max_jump = 0.0
+        rcs_n_jumps_3db = 0
+
+    # Group 4: Binned histogram (5 bins, per-track relative)
+    if n_rcs >= 1:
+        rcs_min_val = np.min(rcs_valid)
+        rcs_max_val = np.max(rcs_valid)
+        if rcs_max_val > rcs_min_val:
+            bin_edges = np.linspace(rcs_min_val, rcs_max_val + 1e-6, 6)
+            hist_counts, _ = np.histogram(rcs_valid, bins=bin_edges)
+            hist_norm = hist_counts / n_rcs
+        else:
+            hist_norm = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
+        rcs_bin0, rcs_bin1, rcs_bin2, rcs_bin3, rcs_bin4 = hist_norm
+    else:
+        rcs_bin0 = rcs_bin1 = rcs_bin2 = rcs_bin3 = rcs_bin4 = 0.0
+
     feats = {
         'n_points':       n,
         'total_dist_m':   total_dist,
@@ -378,6 +451,23 @@ def trajectory_features(row):
         'rcs_min':        np.nanmin(rcs),
         'rcs_max':        np.nanmax(rcs),
         'rcs_range':      rcs_range,
+        'rcs_slope':           rcs_slope,
+        'rcs_half_ratio':      rcs_half_ratio,
+        'rcs_autocorr_lag1':   rcs_autocorr_lag1,
+        'rcs_n_peaks':         rcs_n_peaks,
+        'rcs_n_valleys':       rcs_n_valleys,
+        'rcs_spectral_energy': rcs_spectral_energy,
+        'rcs_dominant_freq':   rcs_dominant_freq,
+        'rcs_peak_power_ratio': rcs_peak_power_ratio,
+        'rcs_gradient_mean':   rcs_gradient_mean,
+        'rcs_gradient_std':    rcs_gradient_std,
+        'rcs_max_jump':        rcs_max_jump,
+        'rcs_n_jumps_3db':     rcs_n_jumps_3db,
+        'rcs_bin0': rcs_bin0,
+        'rcs_bin1': rcs_bin1,
+        'rcs_bin2': rcs_bin2,
+        'rcs_bin3': rcs_bin3,
+        'rcs_bin4': rcs_bin4,
         'tortuosity':     bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
         'tortuosity_max': bearing_changes.max()  if len(bearing_changes) > 0 else 0.0,
         'sharp_turn_ratio':   sharp_turn_ratio,
@@ -516,6 +606,11 @@ trajectory_feats = [
     'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
     'lon_range', 'lat_range', 'alt_mean', 'alt_std',
     'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'rcs_range',
+    'rcs_slope', 'rcs_half_ratio', 'rcs_autocorr_lag1',
+    'rcs_n_peaks', 'rcs_n_valleys',
+    'rcs_spectral_energy', 'rcs_dominant_freq', 'rcs_peak_power_ratio',
+    'rcs_gradient_mean', 'rcs_gradient_std', 'rcs_max_jump', 'rcs_n_jumps_3db',
+    'rcs_bin0', 'rcs_bin1', 'rcs_bin2', 'rcs_bin3', 'rcs_bin4',
     'tortuosity', 'tortuosity_max', 'sharp_turn_ratio',
     'straightness', 'sinuosity',
     'lon_mean', 'lat_mean', 'track_heading_rad',
