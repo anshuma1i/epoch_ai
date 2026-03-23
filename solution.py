@@ -214,6 +214,19 @@ def trajectory_features(row):
     # Sharp turn ratio: fraction of turns > 45 degrees
     sharp_turn_ratio = (bearing_changes > np.pi / 4).mean() if len(bearing_changes) > 0 else 0.0
 
+    # Curvature via cross product of consecutive displacement vectors
+    vecs = np.column_stack([dx, dy])
+    if len(vecs) > 1:
+        curvatures = []
+        for k in range(len(vecs) - 1):
+            v1, v2 = vecs[k], vecs[k + 1]
+            cross = abs(v1[0] * v2[1] - v1[1] * v2[0])
+            norm = np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6
+            curvatures.append(cross / norm)
+        curvatures = np.array(curvatures)
+    else:
+        curvatures = np.array([0.0])
+
     # Straightness index: displacement / total path length
     displacement = np.sqrt(
         ((lons[-1] - lons[0]) * 71000) ** 2 +
@@ -270,6 +283,9 @@ def trajectory_features(row):
         'alt_climb_rate':     alt_climb_rate,
         'alt_descent_rate':   alt_descent_rate,
         'alt_variability':    alt_variability,
+        'curvature_mean':     curvatures.mean(),
+        'curvature_std':      curvatures.std() if len(curvatures) > 1 else 0.0,
+        'log_path_length':    np.log1p(total_dist),
     }
 
     # ── Speed & acceleration from trajectory_time ──
@@ -392,6 +408,7 @@ trajectory_feats = [
     'straightness', 'sinuosity',
     'lon_mean', 'lat_mean', 'track_heading_rad',
     'alt_climb_rate', 'alt_descent_rate', 'alt_variability',
+    'curvature_mean', 'curvature_std', 'log_path_length',
     'speed_mean', 'speed_std', 'speed_max', 'speed_cv',
     'accel_mean', 'accel_std',
 ]
@@ -457,8 +474,8 @@ else:
     print("Oversampler: SMOTENC (default)")
 
 lgb_params = dict(
-    n_estimators=1000,
-    learning_rate=0.05,
+    n_estimators=2500,
+    learning_rate=0.03,
     num_leaves=63,
     min_child_samples=10,
     subsample=0.8,
@@ -540,7 +557,7 @@ needed_columns = [
 # CatBoost setup (used in Stage 2 always, and Stage 1 with --stage1-catboost)
 cb_cat_idx = [len(numeric_features) + i for i in range(len(categorical_features))]
 cb_params = dict(
-    iterations=1000, learning_rate=0.05, depth=8, l2_leaf_reg=3,
+    iterations=2500, learning_rate=0.03, depth=8, l2_leaf_reg=3,
     auto_class_weights='Balanced', random_seed=42, task_type='GPU', verbose=0,
 )
 cb_imputer = ColumnTransformer([
@@ -626,7 +643,7 @@ for i, (train_idx, val_idx) in enumerate(split):
         test_p_gull_raw = cb1.predict_proba(X_te_cb)[:, 1]
     else:
         lgb_binary = LGBMClassifier(
-            n_estimators=1000, learning_rate=0.05, num_leaves=63,
+            n_estimators=2500, learning_rate=0.03, num_leaves=63,
             min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
             class_weight='balanced', random_state=42, n_jobs=-1,
             device='gpu', verbose=-1,
@@ -672,6 +689,7 @@ for i, (train_idx, val_idx) in enumerate(split):
 
     lgb_s2 = LGBMClassifier(**lgb_params)
     lgb_s2.set_params(min_child_samples=max(10, int(len(X_ng_res) * 0.01)))
+    non_gull_va_mask = (y_va != 'Gulls').values
     lgb_s2.fit(X_ng_res, y_ng_res)
     lgb_val_proba = lgb_s2.predict_proba(X_va_imp)
     lgb_test_proba = lgb_s2.predict_proba(X_te_imp)
