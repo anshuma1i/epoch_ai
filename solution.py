@@ -33,9 +33,9 @@ parser.add_argument('--passthrough', action='store_true',
                     help='Disable oversampling entirely')
 parser.add_argument('--smotetomek', action='store_true',
                     help='Use SMOTETomek (SMOTENC + TomekLinks) instead of SMOTENC-only')
-parser.add_argument('--oversampler', choices=['smotenc', 'borderline', 'adasyn', 'trajectory'],
+parser.add_argument('--oversampler', choices=['smotenc', 'borderline', 'adasyn', 'trajectory', 'adasyn+trajectory'],
                     default='smotenc',
-                    help='Oversampling method: smotenc (default), borderline, adasyn, trajectory')
+                    help='Oversampling method: smotenc (default), borderline, adasyn, trajectory, adasyn+trajectory')
 parser.add_argument('--boost-weak', type=float, default=3, metavar='MULT',
                     help='Default sample weight multiplier for weak classes (default: 3)')
 parser.add_argument('--boost-cormorants', type=float, default=0, metavar='MULT',
@@ -58,6 +58,12 @@ parser.add_argument('--gull-threshold', type=float, default=0.5, metavar='T',
 parser.add_argument('--undersample-gulls', type=int, default=0, metavar='N',
                     help='Undersample Gulls to N tracks before two-stage training '
                          '(e.g. --undersample-gulls 500). 0 = no undersampling.')
+parser.add_argument('--jitter-scale', type=float, default=1.0, metavar='S',
+                    help='Scale factor for trajectory jitter magnitudes (default: 1.0)')
+parser.add_argument('--pseudo-label', action='store_true',
+                    help='Pseudo-labeling: train once, add high-confidence test predictions, retrain')
+parser.add_argument('--pseudo-threshold', type=float, default=0.95, metavar='T',
+                    help='Min probability for pseudo-label acceptance (default: 0.95)')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────
@@ -187,7 +193,7 @@ def parse_trajectory(hex_str):
     return []
 
 
-def augment_trajectory_coords(coords, times_list, rng):
+def augment_trajectory_coords(coords, times_list, rng, jitter_scale=1.0):
     """Augment trajectory coordinates with jitter, time warp, and rotation."""
     coords = np.array(coords)
     lons, lats = coords[:, 0].copy(), coords[:, 1].copy()
@@ -195,12 +201,13 @@ def augment_trajectory_coords(coords, times_list, rng):
     rcs = coords[:, 3].copy() if coords.shape[1] > 3 else None
 
     # 1. Spatial jitter (σ calibrated to dataset: ~3m for lon/lat, 2m alt, 0.3dB RCS)
-    lons += rng.normal(0, 0.00003, len(lons))
-    lats += rng.normal(0, 0.00003, len(lats))
+    s = jitter_scale
+    lons += rng.normal(0, 0.00003 * s, len(lons))
+    lats += rng.normal(0, 0.00003 * s, len(lats))
     if alts is not None:
-        alts += rng.normal(0, 2.0, len(alts))
+        alts += rng.normal(0, 2.0 * s, len(alts))
     if rcs is not None:
-        rcs += rng.normal(0, 0.3, len(rcs))
+        rcs += rng.normal(0, 0.3 * s, len(rcs))
 
     # 2. Rotation — rotate displacement vectors by random angle
     angle = rng.uniform(0, 2 * np.pi)
@@ -228,7 +235,7 @@ def augment_trajectory_coords(coords, times_list, rng):
     return new_coords, new_times
 
 
-def augment_weak_classes(train_df, weak_classes, multiplier, rng):
+def augment_weak_classes(train_df, weak_classes, multiplier, rng, jitter_scale=1.0):
     """Augment weak classes by creating trajectory-augmented copies before feature extraction."""
     from shapely.geometry import LineString
     aug_rows = []
@@ -249,7 +256,7 @@ def augment_weak_classes(train_df, weak_classes, multiplier, rng):
             elif isinstance(times, (list, np.ndarray)):
                 t_list = list(times)
 
-            new_coords, new_times = augment_trajectory_coords(coords, t_list, rng)
+            new_coords, new_times = augment_trajectory_coords(coords, t_list, rng, jitter_scale)
 
             # Shapely LineString supports max 3D — store as (lon, lat, alt),
             # encode RCS into alt dimension isn't viable, so use original WKB format
@@ -462,10 +469,10 @@ for df in [train_df, test_df]:
         df['openmeteo_wind_dir_cos'] = np.cos(2 * np.pi * wd / 360)
 
 # Trajectory-level augmentation (before feature extraction)
-if args.oversampler == 'trajectory':
+if args.oversampler in ('trajectory', 'adasyn+trajectory'):
     weak_classes = ['Cormorants', 'Waders', 'Geese']
     aug_rng = np.random.RandomState(42)
-    train_df = augment_weak_classes(train_df, weak_classes, args.boost_weak, aug_rng)
+    train_df = augment_weak_classes(train_df, weak_classes, args.boost_weak, aug_rng, args.jitter_scale)
 
 # Trajectory features
 print("Extracting trajectory features for train_df...")
@@ -571,6 +578,9 @@ if args.passthrough or args.oversampler == 'trajectory':
         print("Oversampler: passthrough (no oversampling)")
     else:
         print("Oversampler: trajectory augmentation (applied before feature extraction)")
+elif args.oversampler == 'adasyn+trajectory':
+    oversampler = ADASYN(random_state=42)
+    print("Oversampler: ADASYN + trajectory augmentation")
 elif args.smotetomek:
     oversampler = SMOTETomek(
         smote=SMOTENC(categorical_features=cat_indices, random_state=42),
@@ -724,7 +734,7 @@ for i, (train_idx, val_idx) in enumerate(split):
     y_va = y.iloc[val_idx]
 
     # Exclude augmented samples from validation (they're copies of training data)
-    if args.oversampler == 'trajectory':
+    if args.oversampler in ('trajectory', 'adasyn+trajectory'):
         va_real = ~X_va.index.astype(str).str.startswith('aug_')
         X_va = X_va[va_real]
         y_va = y_va[va_real]
@@ -805,7 +815,7 @@ for i, (train_idx, val_idx) in enumerate(split):
     else:
         X_ng_res, y_ng_res = X_tr_ng_imp, y_tr_ng
 
-    if args.oversampler != 'trajectory':
+    if args.oversampler not in ('trajectory', 'adasyn+trajectory'):
         X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
 
     lgb_s2 = LGBMClassifier(**lgb_params)
@@ -923,3 +933,202 @@ if use_mlflow:
     mlflow.log_artifact('submission.csv')
     mlflow.end_run()
     print("MLflow run logged.")
+
+# ─────────────────────────────────────────────
+# 11. Pseudo-Labeling (optional)
+# ─────────────────────────────────────────────
+if args.pseudo_label:
+    # Use test predictions from first round to create pseudo-labeled samples
+    pseudo_probs = submission_df[needed_columns]
+    max_prob = pseudo_probs.max(axis=1)
+    pseudo_mask = max_prob >= args.pseudo_threshold
+    pseudo_labels = pseudo_probs.columns[pseudo_probs.values.argmax(axis=1)]
+
+    n_pseudo = pseudo_mask.sum()
+    print(f"\n{'='*50}")
+    print(f" Pseudo-labeling: {n_pseudo}/{len(pseudo_probs)} test samples above {args.pseudo_threshold} threshold")
+    print(f"{'='*50}")
+
+    if n_pseudo > 0:
+        # Build pseudo-labeled dataframe from test features
+        pseudo_X = X_test[pseudo_mask].copy()
+        pseudo_y = pd.Series(pseudo_labels[pseudo_mask], index=pseudo_X.index)
+
+        # Print class distribution of pseudo-labels
+        print(" Pseudo-label distribution:")
+        for cls in sorted(pseudo_y.value_counts().index):
+            print(f"   {cls:20s}: {pseudo_y.value_counts()[cls]}")
+
+        # Combine with original training data
+        X_pl = pd.concat([X, pseudo_X])
+        y_pl = pd.concat([y, pseudo_y])
+
+        # Need groups for StratifiedGroupKFold — pseudo samples get unique group IDs
+        # Use large negative ints for pseudo groups to avoid type mismatch
+        max_group = int(groups.max()) + 1
+        groups_pl = pd.concat([
+            groups,
+            pd.Series([max_group + i for i in range(n_pseudo)], index=pseudo_X.index)
+        ])
+
+        # Rerun CV with pseudo-labeled data
+        cv_pl = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        split_pl = list(cv_pl.split(X_pl, y_pl, groups_pl))
+
+        oof_preds_pl = pd.DataFrame(0.0, index=X_pl.index, columns=classes)
+        test_preds_pl = np.zeros((len(X_test), len(classes)))
+
+        print(f"\nRetraining {len(split_pl)}-fold with pseudo-labels...")
+        for i, (train_idx, val_idx) in enumerate(split_pl):
+            X_tr = X_pl.iloc[train_idx]
+            X_va = X_pl.iloc[val_idx]
+            y_tr = y_pl.iloc[train_idx]
+            y_va = y_pl.iloc[val_idx]
+
+            # Exclude augmented samples from validation
+            if args.oversampler in ('trajectory', 'adasyn+trajectory'):
+                va_real = ~X_va.index.astype(str).str.startswith('aug_')
+                X_va = X_va[va_real]
+                y_va = y_va[va_real]
+
+            if us_gulls > 0:
+                gull_mask = y_tr == 'Gulls'
+                gull_indices = y_tr.index[gull_mask]
+                non_gull_indices = y_tr.index[~gull_mask]
+                if len(gull_indices) > us_gulls:
+                    rng = np.random.RandomState(42 + i)
+                    keep = rng.choice(gull_indices, size=us_gulls, replace=False)
+                    keep_idx = np.concatenate([non_gull_indices, keep])
+                    X_tr, y_tr = X_tr.loc[keep_idx], y_tr.loc[keep_idx]
+
+            # Stage 1: binary Gull vs non-Gull
+            y_binary = (y_tr == 'Gulls').astype(int)
+
+            if args.stage1_catboost:
+                s1_imp = clone(cb_imputer)
+                X_tr_s1 = s1_imp.fit_transform(X_tr, y_binary)
+                X_va_s1 = s1_imp.transform(X_va)
+                X_te_s1 = s1_imp.transform(X_test)
+                cb_s1 = CatBoostClassifier(**cb_params)
+                cb_s1.set_params(loss_function='Logloss')
+                pool_tr = __import__('catboost').Pool(X_tr_s1, y_binary, cat_features=cb_cat_idx)
+                cb_s1.fit(pool_tr)
+                val_p_gull = cb_s1.predict_proba(X_va_s1)[:, 1]
+                test_p_gull = cb_s1.predict_proba(X_te_s1)[:, 1]
+            else:
+                s1_imp = clone(imputer)
+                X_tr_s1 = s1_imp.fit_transform(X_tr, y_binary)
+                X_va_s1 = s1_imp.transform(X_va)
+                X_te_s1 = s1_imp.transform(X_test)
+                lgb_s1 = LGBMClassifier(
+                    n_estimators=1500, learning_rate=0.03, num_leaves=63,
+                    min_child_samples=10, subsample=0.8, colsample_bytree=0.8,
+                    class_weight='balanced', random_state=42, verbose=-1,
+                )
+                lgb_s1.fit(X_tr_s1, y_binary)
+                val_p_gull = lgb_s1.predict_proba(X_va_s1)[:, 1]
+                test_p_gull = lgb_s1.predict_proba(X_te_s1)[:, 1]
+
+            val_p_gull = np.where(val_p_gull >= gull_thresh, val_p_gull, val_p_gull * (gull_thresh / 0.5) if gull_thresh < 0.5 else val_p_gull)
+            test_p_gull = np.where(test_p_gull >= gull_thresh, test_p_gull, test_p_gull * (gull_thresh / 0.5) if gull_thresh < 0.5 else test_p_gull)
+
+            # Stage 2: non-Gull 8-class
+            ng_mask = y_tr != 'Gulls'
+            X_tr_ng = X_tr[ng_mask]
+            y_tr_ng = y_tr[ng_mask]
+
+            lgb_imp = clone(imputer)
+            X_tr_ng_imp = lgb_imp.fit_transform(X_tr_ng, y_tr_ng)
+            X_va_imp = lgb_imp.transform(X_va)
+            X_te_imp = lgb_imp.transform(X_test)
+
+            if oversampler != 'passthrough':
+                os_step = clone(oversampler)
+                X_ng_res, y_ng_res = os_step.fit_resample(X_tr_ng_imp, y_tr_ng)
+            else:
+                X_ng_res, y_ng_res = X_tr_ng_imp, y_tr_ng
+
+            if args.oversampler not in ('trajectory', 'adasyn+trajectory'):
+                X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
+
+            lgb_s2 = LGBMClassifier(**lgb_params)
+            lgb_s2.set_params(min_child_samples=max(10, int(len(X_ng_res) * 0.01)))
+            lgb_s2.fit(X_ng_res, y_ng_res)
+            lgb_val_proba = lgb_s2.predict_proba(X_va_imp)
+            lgb_test_proba = lgb_s2.predict_proba(X_te_imp)
+            s2_classes = lgb_s2.classes_
+
+            # CatBoost Stage 2
+            cb_s2_imp = clone(cb_imputer)
+            X_tr_ng_cb = cb_s2_imp.fit_transform(X_tr_ng, y_tr_ng)
+            X_va_cb = cb_s2_imp.transform(X_va)
+            X_te_cb = cb_s2_imp.transform(X_test)
+            cb_s2 = CatBoostClassifier(**cb_params)
+            pool_ng = __import__('catboost').Pool(X_tr_ng_cb, y_tr_ng, cat_features=cb_cat_idx)
+            cb_s2.fit(pool_ng)
+            cb_val_proba = cb_s2.predict_proba(X_va_cb)
+            cb_test_proba = cb_s2.predict_proba(X_te_cb)
+
+            # Ensemble
+            val_p_rest = 0.5 * lgb_val_proba + 0.5 * cb_val_proba
+            test_p_rest = 0.5 * lgb_test_proba + 0.5 * cb_test_proba
+
+            # Combine Stage 1 + Stage 2
+            val_combined = np.zeros((len(X_va), len(classes)))
+            test_combined = np.zeros((len(X_test), len(classes)))
+            gull_idx = list(classes).index('Gulls')
+            val_combined[:, gull_idx] = val_p_gull
+            test_combined[:, gull_idx] = test_p_gull
+            for j, cls in enumerate(s2_classes):
+                cls_idx = list(classes).index(cls)
+                val_combined[:, cls_idx] = (1 - val_p_gull) * val_p_rest[:, j]
+                test_combined[:, cls_idx] = (1 - test_p_gull) * test_p_rest[:, j]
+
+            oof_preds_pl.loc[X_va.index] = val_combined
+            test_preds_pl += test_combined
+
+            fold_ap = average_precision_score(
+                pd.get_dummies(y_va).reindex(columns=classes, fill_value=0),
+                val_combined, average='macro'
+            )
+            print(f"  Fold {i+1}/{len(split_pl)} — val mAP: {fold_ap:.4f}")
+
+        test_preds_pl /= len(split_pl)
+
+        # Evaluate pseudo-label round (only on original training data)
+        eval_mask_pl = train_df.index.isin(X_pl.index[:len(X.index)])
+        oof_preds_orig = oof_preds_pl.loc[X.index]
+
+        eval_mask2 = ~train_df.index.astype(str).str.startswith('aug_')
+        eval_df2 = train_df[eval_mask2]
+        solution_df2 = (
+            eval_df2.reset_index()
+            .groupby(["track_id", "bird_group"]).size()
+            .unstack(fill_value=0)
+        )
+        oof_aligned2 = oof_preds_orig.reindex(solution_df2.index).loc[solution_df2.index, solution_df2.columns]
+
+        overall_map_pl = average_precision_score(
+            solution_df2[needed_columns],
+            oof_aligned2[needed_columns],
+            average='macro'
+        )
+
+        print(f"\n{'='*50}")
+        print(f" Pseudo-Label OOF mAP: {overall_map_pl:.4f}")
+        print(f"{'='*50}")
+        print("\n Per-Class Average Precision:")
+        for cls in needed_columns:
+            if cls in solution_df2.columns and cls in oof_aligned2.columns:
+                ap = average_precision_score(solution_df2[cls], oof_aligned2[cls])
+                print(f"   {cls:20s}: {ap:.4f}")
+
+        # Save pseudo-label submission
+        submission_pl = pd.DataFrame(
+            test_preds_pl, index=X_test.index, columns=classes
+        )
+        submission_pl.index.name = 'track_id'
+        submission_pl.to_csv('submission.csv')
+        print(f"\nSaved submission.csv with pseudo-labels ({len(submission_pl)} rows)")
+    else:
+        print("No test samples above threshold — skipping pseudo-label round.")

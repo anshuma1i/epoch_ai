@@ -35,28 +35,61 @@ boost-weak=3, oversampler=SMOTENC
 - Best Cormorants: 0.4208 (+0.0635)
 - High fold variance (0.5547–0.8523) — needs tuning
 
+### Run 4: ADASYN + Trajectory Augmentation combined
+- Trajectory aug pre-feature-extraction + ADASYN in pipeline
+- **Result: mAP 0.7000** (+0.0001) — no improvement, methods interfere
+- Cormorants 0.4217, Geese 0.6336, Ducks 0.7348
+
+### Run 5: ADASYN + Pseudo-Labeling (threshold=0.95)
+- First round: standard ADASYN → mAP 0.7012
+- 936/1872 test samples above 0.95 threshold added as pseudo-labels
+- Pseudo-label distribution: 811 Gulls, 93 Songbirds, 14 BoP, 9 Geese, 6 Clutter, 3 Ducks
+- **Result: mAP 0.7148** (+0.0149) — new best (but possibly inflated, see caveat)
+- Notable: Waders 0.3811 (+0.0619), BoP 0.6271 (+0.0306), Ducks 0.7575
+- ⚠️ Caveat: OOF mAP may be inflated — pseudo-labeled test samples in training folds can leak test-distribution info
+
+### Run 6: Trajectory Augmentation with halved jitter (--jitter-scale 0.5)
+- σ=0.000015° lon/lat, σ=1m alt, σ=0.15dB RCS
+- **Result: mAP 0.7059** (+0.0031 vs original trajectory aug)
+- Fold variance: 0.5598–0.8446 (vs 0.5547–0.8523 original) — slightly tighter
+- Better overall than full jitter, Ducks 0.7531 best ever
+
 ### Summary Table
 
-| Method | mAP | Cormorants | Geese | Ducks |
-|--------|-----|------------|-------|-------|
-| Baseline (SMOTENC) | 0.6999 | 0.3573 | 0.6282 | 0.7180 |
-| BorderlineSMOTE | 0.7003 | 0.3812 | 0.6532 | 0.7419 |
-| **ADASYN** | **0.7041** | 0.4068 | **0.6668** | 0.7395 |
-| Trajectory Aug | 0.7028 | **0.4208** | 0.6309 | **0.7466** |
+| Method | mAP | Cormorants | Geese | Ducks | Waders | BoP |
+|--------|-----|------------|-------|-------|--------|-----|
+| Baseline (SMOTENC) | 0.6999 | 0.3573 | 0.6282 | 0.7180 | — | — |
+| BorderlineSMOTE | 0.7003 | 0.3812 | 0.6532 | 0.7419 | — | — |
+| **ADASYN** | **0.7041** | 0.4068 | **0.6668** | 0.7395 | 0.3192 | 0.6013 |
+| Trajectory Aug | 0.7028 | **0.4208** | 0.6309 | 0.7466 | — | — |
+| ADASYN + Traj Aug | 0.7000 | 0.4217 | 0.6336 | 0.7348 | 0.3352 | 0.5762 |
+| Traj Aug (0.5x jitter) | 0.7059 | 0.4179 | 0.6426 | **0.7531** | 0.3513 | 0.5913 |
+| ADASYN + Pseudo-Label⚠️ | 0.7148⚠️ | 0.4027 | 0.6577 | 0.7575 | **0.3811** | **0.6271** |
 
 ## Next Steps
-- [ ] Try ADASYN + trajectory augmentation combined
-- [ ] Pseudo-labeling: use high-confidence test predictions as additional training data
-- [ ] Tune trajectory augmentation jitter params to reduce fold variance
+- [x] Try ADASYN + trajectory augmentation combined → no improvement
+- [x] Pseudo-labeling → mAP 0.7148 but possibly inflated
+- [x] Tune trajectory augmentation jitter params → 0.5x jitter slightly better
 - [ ] Update submission.ipynb with best config (ADASYN)
+- [ ] Try pseudo-labeling with lower threshold (0.90, 0.85) to add more weak-class samples
+- [ ] Try pseudo-labeling combined with trajectory augmentation
 
 ## CLI Usage
 ```bash
-# ADASYN (current best)
+# ADASYN (current best verified)
 .venv/bin/python -W ignore solution.py --oversampler adasyn
 
 # Trajectory augmentation
 .venv/bin/python -W ignore solution.py --oversampler trajectory
+
+# Trajectory augmentation with reduced jitter
+.venv/bin/python -W ignore solution.py --oversampler trajectory --jitter-scale 0.5
+
+# ADASYN + trajectory combined
+.venv/bin/python -W ignore solution.py --oversampler adasyn+trajectory
+
+# Pseudo-labeling
+.venv/bin/python -W ignore solution.py --oversampler adasyn --pseudo-label
 
 # BorderlineSMOTE
 .venv/bin/python -W ignore solution.py --oversampler borderline
