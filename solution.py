@@ -999,6 +999,55 @@ for j, cls in enumerate(s2_classes):
     test_preds[:, ci] = (1 - test_gull_acc) * test_p_rest_opt[:, j]
 
 # ─────────────────────────────────────────────
+# 8c. Per-class probability calibration
+# ─────────────────────────────────────────────
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression as LR_cal
+
+eval_mask_cal = ~train_df.index.astype(str).str.startswith('aug_')
+y_cal = train_df.loc[eval_mask_cal, 'bird_group']
+oof_cal = oof_preds.loc[eval_mask_cal]
+
+calibrated_oof = oof_cal.copy()
+calibrators = {}
+for cls in needed_columns:
+    y_binary = (y_cal == cls).astype(int).values
+    p_raw = oof_cal[cls].values
+    n_pos = y_binary.sum()
+    if n_pos < 100:
+        # Platt scaling for small classes
+        cal = LR_cal(C=1.0, solver='lbfgs', max_iter=1000)
+        cal.fit(p_raw.reshape(-1, 1), y_binary)
+        calibrators[cls] = ('platt', cal)
+        calibrated_oof[cls] = cal.predict_proba(p_raw.reshape(-1, 1))[:, 1]
+    else:
+        # Isotonic regression for large classes
+        cal = IsotonicRegression(out_of_bounds='clip')
+        cal.fit(p_raw, y_binary)
+        calibrators[cls] = ('isotonic', cal)
+        calibrated_oof[cls] = cal.predict(p_raw)
+
+# Renormalize rows to sum to 1
+row_sums = calibrated_oof.sum(axis=1)
+calibrated_oof = calibrated_oof.div(row_sums, axis=0)
+oof_preds.loc[eval_mask_cal] = calibrated_oof
+
+# Calibrate test predictions
+test_preds_df = pd.DataFrame(test_preds, columns=classes)
+for cls in needed_columns:
+    cal_type, cal = calibrators[cls]
+    if cal_type == 'platt':
+        test_preds_df[cls] = cal.predict_proba(test_preds_df[cls].values.reshape(-1, 1))[:, 1]
+    else:
+        test_preds_df[cls] = cal.predict(test_preds_df[cls].values)
+# Renormalize
+test_row_sums = test_preds_df.sum(axis=1)
+test_preds_df = test_preds_df.div(test_row_sums, axis=0)
+test_preds = test_preds_df.values
+
+print("  Probability calibration applied (Platt for small classes, Isotonic for large)")
+
+# ─────────────────────────────────────────────
 # 9. Evaluation
 # ─────────────────────────────────────────────
 # For evaluation, only use original (non-augmented) samples
