@@ -60,6 +60,8 @@ parser.add_argument('--undersample-gulls', type=int, default=0, metavar='N',
                          '(e.g. --undersample-gulls 500). 0 = no undersampling.')
 parser.add_argument('--jitter-scale', type=float, default=1.0, metavar='S',
                     help='Scale factor for trajectory jitter magnitudes (default: 1.0)')
+parser.add_argument('--n-seeds', type=int, default=1, metavar='N',
+                    help='Number of random seeds for seed averaging (default: 1)')
 parser.add_argument('--pseudo-label', action='store_true',
                     help='Pseudo-labeling: train once, add high-confidence test predictions, retrain')
 parser.add_argument('--pseudo-threshold', type=float, default=0.95, metavar='T',
@@ -364,78 +366,7 @@ def trajectory_features(row):
     # RCS range
     rcs_range = np.nanmax(rcs) - np.nanmin(rcs)
 
-    # ── RCS radar signature features ──
-    rcs_arr = np.array(rcs, dtype=float)
-    rcs_valid = rcs_arr[~np.isnan(rcs_arr)]
-    n_rcs = len(rcs_valid)
-
-    # Group 1: Temporal shape
-    if n_rcs >= 2:
-        rcs_slope = np.polyfit(np.arange(n_rcs), rcs_valid, 1)[0]
-        mid = n_rcs // 2
-        half1_mean = np.mean(rcs_valid[:mid]) if mid > 0 else rcs_valid[0]
-        half2_mean = np.mean(rcs_valid[mid:])
-        rcs_half_ratio = half1_mean / (half2_mean + 1e-6)
-        rcs_centered = rcs_valid - np.mean(rcs_valid)
-        var = np.dot(rcs_centered, rcs_centered)
-        rcs_autocorr_lag1 = np.dot(rcs_centered[:-1], rcs_centered[1:]) / (var + 1e-6)
-        rcs_diff = np.diff(rcs_valid)
-        sign_changes = np.diff(np.sign(rcs_diff))
-        rcs_n_peaks = int(np.sum(sign_changes < 0))
-        rcs_n_valleys = int(np.sum(sign_changes > 0))
-    else:
-        rcs_slope = 0.0
-        rcs_half_ratio = 1.0
-        rcs_autocorr_lag1 = 0.0
-        rcs_n_peaks = 0
-        rcs_n_valleys = 0
-
-    # Group 2: FFT/frequency
-    if n_rcs >= 4:
-        rcs_detrended = rcs_valid - np.mean(rcs_valid)
-        fft_vals = np.fft.rfft(rcs_detrended)
-        fft_power = np.abs(fft_vals) ** 2
-        fft_power_no_dc = fft_power[1:]
-        freqs = np.fft.rfftfreq(n_rcs)[1:]
-        rcs_spectral_energy = np.sum(fft_power_no_dc)
-        if len(fft_power_no_dc) > 0 and rcs_spectral_energy > 0:
-            peak_idx = np.argmax(fft_power_no_dc)
-            rcs_dominant_freq = freqs[peak_idx]
-            rcs_peak_power_ratio = fft_power_no_dc[peak_idx] / (rcs_spectral_energy + 1e-6)
-        else:
-            rcs_dominant_freq = 0.0
-            rcs_peak_power_ratio = 0.0
-    else:
-        rcs_spectral_energy = 0.0
-        rcs_dominant_freq = 0.0
-        rcs_peak_power_ratio = 0.0
-
-    # Group 3: Change-point
-    if n_rcs >= 2:
-        rcs_gradient = np.diff(rcs_valid)
-        rcs_gradient_mean = np.mean(rcs_gradient)
-        rcs_gradient_std = np.std(rcs_gradient)
-        rcs_max_jump = np.max(np.abs(rcs_gradient))
-        rcs_n_jumps_3db = int(np.sum(np.abs(rcs_gradient) > 3.0))
-    else:
-        rcs_gradient_mean = 0.0
-        rcs_gradient_std = 0.0
-        rcs_max_jump = 0.0
-        rcs_n_jumps_3db = 0
-
-    # Group 4: Binned histogram (5 bins, per-track relative)
-    if n_rcs >= 1:
-        rcs_min_val = np.min(rcs_valid)
-        rcs_max_val = np.max(rcs_valid)
-        if rcs_max_val > rcs_min_val:
-            bin_edges = np.linspace(rcs_min_val, rcs_max_val + 1e-6, 6)
-            hist_counts, _ = np.histogram(rcs_valid, bins=bin_edges)
-            hist_norm = hist_counts / n_rcs
-        else:
-            hist_norm = np.array([1.0, 0.0, 0.0, 0.0, 0.0])
-        rcs_bin0, rcs_bin1, rcs_bin2, rcs_bin3, rcs_bin4 = hist_norm
-    else:
-        rcs_bin0 = rcs_bin1 = rcs_bin2 = rcs_bin3 = rcs_bin4 = 0.0
+    # (No extra RCS features — baseline stats sufficient for dataset size)
 
     feats = {
         'n_points':       n,
@@ -451,23 +382,6 @@ def trajectory_features(row):
         'rcs_min':        np.nanmin(rcs),
         'rcs_max':        np.nanmax(rcs),
         'rcs_range':      rcs_range,
-        'rcs_slope':           rcs_slope,
-        'rcs_half_ratio':      rcs_half_ratio,
-        'rcs_autocorr_lag1':   rcs_autocorr_lag1,
-        'rcs_n_peaks':         rcs_n_peaks,
-        'rcs_n_valleys':       rcs_n_valleys,
-        'rcs_spectral_energy': rcs_spectral_energy,
-        'rcs_dominant_freq':   rcs_dominant_freq,
-        'rcs_peak_power_ratio': rcs_peak_power_ratio,
-        'rcs_gradient_mean':   rcs_gradient_mean,
-        'rcs_gradient_std':    rcs_gradient_std,
-        'rcs_max_jump':        rcs_max_jump,
-        'rcs_n_jumps_3db':     rcs_n_jumps_3db,
-        'rcs_bin0': rcs_bin0,
-        'rcs_bin1': rcs_bin1,
-        'rcs_bin2': rcs_bin2,
-        'rcs_bin3': rcs_bin3,
-        'rcs_bin4': rcs_bin4,
         'tortuosity':     bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
         'tortuosity_max': bearing_changes.max()  if len(bearing_changes) > 0 else 0.0,
         'sharp_turn_ratio':   sharp_turn_ratio,
@@ -606,11 +520,6 @@ trajectory_feats = [
     'n_points', 'total_dist_m', 'mean_step_m', 'std_step_m',
     'lon_range', 'lat_range', 'alt_mean', 'alt_std',
     'rcs_mean', 'rcs_std', 'rcs_min', 'rcs_max', 'rcs_range',
-    'rcs_slope', 'rcs_half_ratio', 'rcs_autocorr_lag1',
-    'rcs_n_peaks', 'rcs_n_valleys',
-    'rcs_spectral_energy', 'rcs_dominant_freq', 'rcs_peak_power_ratio',
-    'rcs_gradient_mean', 'rcs_gradient_std', 'rcs_max_jump', 'rcs_n_jumps_3db',
-    'rcs_bin0', 'rcs_bin1', 'rcs_bin2', 'rcs_bin3', 'rcs_bin4',
     'tortuosity', 'tortuosity_max', 'sharp_turn_ratio',
     'straightness', 'sinuosity',
     'lon_mean', 'lat_mean', 'track_heading_rad',
@@ -913,38 +822,70 @@ for i, (train_idx, val_idx) in enumerate(split):
     if args.oversampler not in ('trajectory', 'adasyn+trajectory'):
         X_ng_res, y_ng_res = apply_boost(X_ng_res, y_ng_res, CLASS_BOOST)
 
-    lgb_s2 = LGBMClassifier(**lgb_params)
-    lgb_s2.set_params(min_child_samples=max(10, int(len(X_ng_res) * 0.01)))
-    non_gull_va_mask = (y_va != 'Gulls').values
-    lgb_s2.fit(X_ng_res, y_ng_res)
-    lgb_val_proba = lgb_s2.predict_proba(X_va_imp)
-    lgb_test_proba = lgb_s2.predict_proba(X_te_imp)
-    s2_classes = lgb_s2.classes_
+    # ── Stage 2: Seed-averaged LightGBM + CatBoost ──
+    n_seeds = args.n_seeds
+    seed_list = [42 + s for s in range(n_seeds)]
 
-    # ── Stage 2b: CatBoost ──
-    cb_imp2 = clone(cb_imputer)
-    X_tr_ng_cb = cb_imp2.fit_transform(X_tr_ng, y_tr_ng)
-    X_va_cb2 = cb_imp2.transform(X_va)
-    X_te_cb2 = cb_imp2.transform(X_test)
-    for ci in cb_cat_idx:
-        X_tr_ng_cb[:, ci] = X_tr_ng_cb[:, ci].astype(str)
-        X_va_cb2[:, ci] = X_va_cb2[:, ci].astype(str)
-        X_te_cb2[:, ci] = X_te_cb2[:, ci].astype(str)
+    lgb_val_proba_acc = None
+    lgb_test_proba_acc = None
+    cb_val_proba_acc = None
+    cb_test_proba_acc = None
+    s2_classes = None
 
-    cb_s2 = CatBoostClassifier(**cb_params)
-    cb_s2.fit(X_tr_ng_cb, y_tr_ng,
-              cat_features=cb_cat_idx)
-    cb_val_proba = cb_s2.predict_proba(X_va_cb2)
-    cb_test_proba = cb_s2.predict_proba(X_te_cb2)
+    for seed in seed_list:
+        # LightGBM with this seed
+        lgb_s2 = LGBMClassifier(**lgb_params)
+        lgb_s2.set_params(
+            min_child_samples=max(10, int(len(X_ng_res) * 0.01)),
+            random_state=seed,
+        )
+        lgb_s2.fit(X_ng_res, y_ng_res)
+        _lgb_val = lgb_s2.predict_proba(X_va_imp)
+        _lgb_test = lgb_s2.predict_proba(X_te_imp)
+        if s2_classes is None:
+            s2_classes = lgb_s2.classes_
+        if lgb_val_proba_acc is None:
+            lgb_val_proba_acc = _lgb_val
+            lgb_test_proba_acc = _lgb_test
+        else:
+            lgb_val_proba_acc += _lgb_val
+            lgb_test_proba_acc += _lgb_test
 
-    # Align CatBoost classes to LightGBM class order
-    cb_s2_classes = cb_s2.classes_
-    if not np.array_equal(cb_s2_classes, s2_classes):
-        cb_reorder = [list(cb_s2_classes).index(c) for c in s2_classes]
-        cb_val_proba = cb_val_proba[:, cb_reorder]
-        cb_test_proba = cb_test_proba[:, cb_reorder]
+        # CatBoost with this seed
+        cb_imp2 = clone(cb_imputer)
+        X_tr_ng_cb = cb_imp2.fit_transform(X_tr_ng, y_tr_ng)
+        X_va_cb2 = cb_imp2.transform(X_va)
+        X_te_cb2 = cb_imp2.transform(X_test)
+        for ci in cb_cat_idx:
+            X_tr_ng_cb[:, ci] = X_tr_ng_cb[:, ci].astype(str)
+            X_va_cb2[:, ci] = X_va_cb2[:, ci].astype(str)
+            X_te_cb2[:, ci] = X_te_cb2[:, ci].astype(str)
 
-    # ── Stage 2 ensemble: simple average ──
+        cb_s2 = CatBoostClassifier(**{**cb_params, 'random_seed': seed})
+        cb_s2.fit(X_tr_ng_cb, y_tr_ng, cat_features=cb_cat_idx)
+        _cb_val = cb_s2.predict_proba(X_va_cb2)
+        _cb_test = cb_s2.predict_proba(X_te_cb2)
+
+        # Align CatBoost classes to LightGBM class order
+        cb_s2_classes = cb_s2.classes_
+        if not np.array_equal(cb_s2_classes, s2_classes):
+            cb_reorder = [list(cb_s2_classes).index(c) for c in s2_classes]
+            _cb_val = _cb_val[:, cb_reorder]
+            _cb_test = _cb_test[:, cb_reorder]
+
+        if cb_val_proba_acc is None:
+            cb_val_proba_acc = _cb_val
+            cb_test_proba_acc = _cb_test
+        else:
+            cb_val_proba_acc += _cb_val
+            cb_test_proba_acc += _cb_test
+
+    lgb_val_proba = lgb_val_proba_acc / n_seeds
+    lgb_test_proba = lgb_test_proba_acc / n_seeds
+    cb_val_proba = cb_val_proba_acc / n_seeds
+    cb_test_proba = cb_test_proba_acc / n_seeds
+
+    # ── Stage 2 ensemble: simple average (weight optimization done post-CV) ──
     val_p_rest = (lgb_val_proba + cb_val_proba) / 2
     test_p_rest = (lgb_test_proba + cb_test_proba) / 2
 
