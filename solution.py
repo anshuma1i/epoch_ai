@@ -729,6 +729,13 @@ if use_mlflow:
 
 oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
 test_preds = np.zeros((len(X_test), len(classes)))
+# For weighted ensemble optimization: store per-fold LGB/CB predictions
+oof_lgb_rest = {}   # fold_idx -> (val_idx, lgb_proba, s2_classes)
+oof_cb_rest = {}    # fold_idx -> (val_idx, cb_proba)
+oof_gull = {}       # fold_idx -> (val_idx, p_gull)
+test_lgb_rest_acc = np.zeros((len(X_test), 1))  # placeholder, sized later
+test_cb_rest_acc = np.zeros((len(X_test), 1))
+test_gull_acc = np.zeros(len(X_test))
 
 print(f"\nTraining {len(split)}-fold two-stage pipeline...")
 for i, (train_idx, val_idx) in enumerate(split):
@@ -885,7 +892,19 @@ for i, (train_idx, val_idx) in enumerate(split):
     cb_val_proba = cb_val_proba_acc / n_seeds
     cb_test_proba = cb_test_proba_acc / n_seeds
 
-    # ── Stage 2 ensemble: simple average (weight optimization done post-CV) ──
+    # Store per-model predictions for weight optimization
+    oof_lgb_rest[i] = (X_va.index, lgb_val_proba, s2_classes)
+    oof_cb_rest[i] = (X_va.index, cb_val_proba)
+    oof_gull[i] = (X_va.index, val_p_gull)
+    # Accumulate test predictions per model
+    if test_lgb_rest_acc.shape[1] == 1:
+        test_lgb_rest_acc = np.zeros((len(X_test), lgb_test_proba.shape[1]))
+        test_cb_rest_acc = np.zeros((len(X_test), cb_test_proba.shape[1]))
+    test_lgb_rest_acc += lgb_test_proba
+    test_cb_rest_acc += cb_test_proba
+    test_gull_acc += test_p_gull
+
+    # ── Stage 2 ensemble: simple average for per-fold mAP reporting ──
     val_p_rest = (lgb_val_proba + cb_val_proba) / 2
     test_p_rest = (lgb_test_proba + cb_test_proba) / 2
 
@@ -917,6 +936,67 @@ for i, (train_idx, val_idx) in enumerate(split):
         mlflow.log_metric(f"fold_mAP", fold_ap, step=i)
 
 test_preds /= len(split)
+test_lgb_rest_acc /= len(split)
+test_cb_rest_acc /= len(split)
+test_gull_acc /= len(split)
+
+# ─────────────────────────────────────────────
+# 8b. Weighted ensemble optimization
+# ─────────────────────────────────────────────
+# Rebuild OOF predictions with different LGB/CB weights and find optimal
+eval_mask_we = ~train_df.index.astype(str).str.startswith('aug_')
+best_w = 0.5
+best_map_w = 0.0
+for w_int in range(10, 91, 5):  # 0.10 to 0.90
+    w = w_int / 100.0
+    oof_w = pd.DataFrame(0.0, index=X.index, columns=classes)
+    for fi in oof_lgb_rest:
+        va_idx, lgb_p, s2_cls = oof_lgb_rest[fi]
+        _, cb_p = oof_cb_rest[fi]
+        _, p_gull = oof_gull[fi]
+        rest_p = w * lgb_p + (1 - w) * cb_p
+        combined = np.zeros((len(va_idx), len(classes)))
+        gull_ci = list(classes).index('Gulls')
+        combined[:, gull_ci] = p_gull
+        for j, cls in enumerate(s2_cls):
+            ci = list(classes).index(cls)
+            combined[:, ci] = (1 - p_gull) * rest_p[:, j]
+        oof_w.loc[va_idx] = combined
+    # Evaluate
+    eval_df_w = train_df[eval_mask_we]
+    sol_w = eval_df_w.reset_index().groupby(["track_id", "bird_group"]).size().unstack(fill_value=0)
+    oof_w_al = oof_w.reindex(sol_w.index).loc[sol_w.index, sol_w.columns]
+    map_w = average_precision_score(sol_w[needed_columns], oof_w_al[needed_columns], average='macro')
+    if map_w > best_map_w:
+        best_map_w = map_w
+        best_w = w
+
+print(f"\n  Ensemble weight optimization: best w(LGB)={best_w:.2f}, w(CB)={1-best_w:.2f} → mAP={best_map_w:.4f}")
+
+# Rebuild final OOF and test predictions with optimal weight
+oof_preds = pd.DataFrame(0.0, index=X.index, columns=classes)
+for fi in oof_lgb_rest:
+    va_idx, lgb_p, s2_cls = oof_lgb_rest[fi]
+    _, cb_p = oof_cb_rest[fi]
+    _, p_gull = oof_gull[fi]
+    rest_p = best_w * lgb_p + (1 - best_w) * cb_p
+    combined = np.zeros((len(va_idx), len(classes)))
+    gull_ci = list(classes).index('Gulls')
+    combined[:, gull_ci] = p_gull
+    for j, cls in enumerate(s2_cls):
+        ci = list(classes).index(cls)
+        combined[:, ci] = (1 - p_gull) * rest_p[:, j]
+    oof_preds.loc[va_idx] = combined
+
+# Rebuild test predictions with optimal weight
+test_p_rest_opt = best_w * test_lgb_rest_acc + (1 - best_w) * test_cb_rest_acc
+test_preds = np.zeros((len(X_test), len(classes)))
+gull_ci = list(classes).index('Gulls')
+test_preds[:, gull_ci] = test_gull_acc
+# Use s2_classes from last fold (all folds have same classes)
+for j, cls in enumerate(s2_classes):
+    ci = list(classes).index(cls)
+    test_preds[:, ci] = (1 - test_gull_acc) * test_p_rest_opt[:, j]
 
 # ─────────────────────────────────────────────
 # 9. Evaluation
