@@ -8,3 +8,5 @@ __pycache__/*
 .DS_Store
 catboost_info/
 mlruns/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
