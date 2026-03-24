@@ -1,17 +1,15 @@
 """
-AI Cup 2026 — Bird Radar Track Classification (Experimental Solution 2)
-Trains a LightGBM model with group-aware CV using tide-enriched datasets,
-and generates an experimental submission file.
+AI Cup 2026 — Bird Radar Track Classification (Open-Meteo Mainline)
+Trains a LightGBM model with group-aware CV using Open-Meteo-enriched datasets,
+and generates a submission file.
 """
 
 # ─────────────────────────────────────────────
 # 1. Model Hyperparameters
 # ─────────────────────────────────────────────
-# Primary experiment defaults (best-known branch behavior)
-DATASET_VARIANT = 'openmeteo_tide'  # one of: knmi, openmeteo, openmeteo_tide, all
-TIDE_ABLATION = 'tide_all'  # one of: tide_all, openmeteo_only, tide_level, tide_level_rising
-USE_ENSEMBLE = True
-USE_TWO_STAGE = True
+# Primary experiment defaults (Open-Meteo-only Kaggle baseline)
+USE_ENSEMBLE = False
+USE_TWO_STAGE = False
 
 # Optional model controls
 USE_FOCAL_LOSS = False
@@ -24,47 +22,35 @@ BOOST_CORMORANTS = 0.0
 BOOST_WADERS = 0.0
 BOOST_GEESE = 0.0
 
-# Optional OOF-only weak-class probability reweighting
-# This runs after model training and tunes small multipliers on OOF predictions.
-USE_OOF_WEAK_REWEIGHT = False
-WEAK_REWEIGHT_CLASSES = ['Cormorants', 'Waders', 'Geese']
-WEAK_REWEIGHT_GRID = [0.9, 1.0, 1.1, 1.2, 1.3]
-
-# Optional weak-class specialist blending
-# Trains binary specialist heads for weak classes and blends with OOF-tuned alphas.
-USE_WEAK_SPECIALIST_BLEND = False
-WEAK_SPECIALIST_CLASSES = ['Cormorants', 'Waders']
-WEAK_SPECIALIST_ALPHA_GRID = [0.0, 0.1, 0.2, 0.3, 0.4]
-WEAK_SPECIALIST_POS_WEIGHT = 4.0
-WEAK_SPECIALIST_N_ESTIMATORS = 700
-
-# Optional confusion-set resolver (Experiment A)
-# Applies a conservative second-stage resolver only on uncertain confusion subsets.
-ENABLE_CONFUSION_RESOLVER = False
-CONFUSION_TARGET_CLASSES = ['Cormorants', 'Waders']
-CONFUSION_TOPK = 2
-RESOLVER_MARGIN_THRESHOLD = 0.08
-RESOLVER_ALPHA = 0.35
-RESOLVER_MODEL_TYPE = 'logreg'
-
-# Optional compact metadata interaction pack (Stage-1 features only)
-ENABLE_METADATA_INTERACTION_PACK = True
-METADATA_INTERACTION_PACK_NAME = 'pack_v1'
-METADATA_INTERACTION_DROP = ['rising_night_interaction']  # ablation helper: explicit interaction names to exclude
-METADATA_INTERACTION_FEATURE_SPECS = [
-    ('tide_hour_sin', ['tide_water_level_cm_nap', 'hour_sin']),
-    ('tide_hour_cos', ['tide_water_level_cm_nap', 'hour_cos']),
-    ('tide_delta_hour_sin', ['tide_delta_10min', 'hour_sin']),
-    ('tide_delta_hour_cos', ['tide_delta_10min', 'hour_cos']),
-    ('headwind_tide_delta', ['headwind_component', 'tide_delta_10min']),
-    ('gustiness_tide_delta', ['openmeteo_wind_gusts_10m_kmh', 'openmeteo_wind_speed_10m_kmh', 'tide_delta_10min']),
-    ('rising_night_interaction', ['rising_tide_flag', 'is_daytime']),
-    ('precip_tide_motion', ['openmeteo_precipitation_mm', 'tide_delta_10min']),
-]
+# Removed from Open-Meteo mainline by design:
+# - confusion resolver path
+# - weak specialist blend path
+# - weak OOF reweight path
+# - tide-dependent metadata interaction pack
 
 # Two-stage controls
 GULL_THRESHOLD = 0.5
 UNDERSAMPLE_GULLS = 0
+
+# Feature-pack controls
+ENABLE_RCS_PACK_V1 = False
+ENABLE_RCS_PACK_V2 = False
+ENABLE_TRAJECTORY_PACK_V1 = True
+TRAJECTORY_PACK_V1_MODE = 'full'  # options: full, no_turn, no_vertical, drop_vz_p90_abs, drop_climb_descent_ratio
+
+if ENABLE_RCS_PACK_V1 and ENABLE_RCS_PACK_V2:
+    raise ValueError("Enable only one RCS pack at a time: V1 or V2.")
+if TRAJECTORY_PACK_V1_MODE not in {
+    'full',
+    'no_turn',
+    'no_vertical',
+    'drop_vz_p90_abs',
+    'drop_climb_descent_ratio',
+}:
+    raise ValueError(
+        "TRAJECTORY_PACK_V1_MODE must be one of: "
+        "full, no_turn, no_vertical, drop_vz_p90_abs, drop_climb_descent_ratio"
+    )
 
 # Optional tuning/grid-search controls
 RUN_GRID_SEARCH = False  # legacy alias for RUN_GRID_SEARCH_LGBM
@@ -99,14 +85,12 @@ COMPETITION_CLASS_ORDER = [
 # 2. Imports
 # ─────────────────────────────────────────────
 from pathlib import Path
-from itertools import product
 import numpy as np
 import pandas as pd
 from shapely import wkb
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
@@ -127,154 +111,75 @@ if RUN_TUNE_CATBOOST and RUN_GRID_SEARCH_CATBOOST:
     print("Note: both RUN_TUNE_CATBOOST and RUN_GRID_SEARCH_CATBOOST were set; using RUN_GRID_SEARCH_CATBOOST.")
 
 # ─────────────────────────────────────────────
-# 3. Load Data
+# 3. Load Data (Open-Meteo-only)
 # ─────────────────────────────────────────────
-DATASET_CONFIG = {
-    'knmi': {
-        'train': 'dataset/train_with_knmi_286.csv',
-        'test': 'dataset/test_with_knmi_286.csv',
-        'wind_speed_col': 'knmi_286_hourly_mean_wind_speed_mps',
-        'wind_speed_obs_col': 'knmi_286_wind_speed_at_observation_mps',
-        'wind_unit_factor': 1.0,  # already m/s
-        'weather_features': [
-            'knmi_286_wind_direction_degrees',
-            'knmi_286_hourly_mean_wind_speed_mps',
-            'knmi_286_wind_speed_at_observation_mps',
-            'knmi_286_max_wind_gust_mps',
-            'knmi_286_air_temperature_c',
-            'knmi_286_dew_point_temperature_c',
-            'knmi_286_sunshine_duration_hours',
-            'knmi_286_global_radiation_j_cm2',
-            'knmi_286_precipitation_duration_hours',
-            'knmi_286_precipitation_amount_mm',
-            'knmi_286_relative_humidity_percent',
-            'knmi_286_weather_indicator_code',
-            'knmi_286_wind_dir_sin',
-            'knmi_286_wind_dir_cos',
-            'knmi_286_wind_dir_variable',
-        ],
-    },
-    'openmeteo': {
-        'train': 'dataset/train_with_openmeteo.csv',
-        'test': 'dataset/test_with_openmeteo.csv',
-        'wind_speed_col': 'openmeteo_wind_speed_10m_kmh',
-        'wind_speed_obs_col': 'openmeteo_wind_speed_10m_kmh',
-        'wind_unit_factor': 1 / 3.6,  # km/h → m/s
-        'weather_features': [
-            'openmeteo_air_temperature_2m_c',
-            'openmeteo_relative_humidity_2m_percent',
-            'openmeteo_dew_point_2m_c',
-            'openmeteo_precipitation_mm',
-            'openmeteo_cloud_cover_percent',
-            'openmeteo_pressure_msl_hpa',
-            'openmeteo_weather_code',
-            'openmeteo_wind_speed_10m_kmh',
-            'openmeteo_wind_direction_10m_degrees',
-            'openmeteo_wind_gusts_10m_kmh',
-            'openmeteo_shortwave_radiation_w_m2',
-            'openmeteo_sunshine_duration_s',
-            'openmeteo_vapour_pressure_deficit_kpa',
-            'openmeteo_is_day',
-            'openmeteo_wind_dir_sin',
-            'openmeteo_wind_dir_cos',
-        ],
-    },
-    'openmeteo_tide': {
-        'train': 'dataset/train_with_openmeteo_tide.csv',
-        'test': 'dataset/test_with_openmeteo_tide.csv',
-        'wind_speed_col': 'openmeteo_wind_speed_10m_kmh',
-        'wind_speed_obs_col': 'openmeteo_wind_speed_10m_kmh',
-        'wind_unit_factor': 1 / 3.6,  # km/h → m/s
-        'weather_features': [
-            'openmeteo_air_temperature_2m_c',
-            'openmeteo_relative_humidity_2m_percent',
-            'openmeteo_dew_point_2m_c',
-            'openmeteo_precipitation_mm',
-            'openmeteo_cloud_cover_percent',
-            'openmeteo_pressure_msl_hpa',
-            'openmeteo_weather_code',
-            'openmeteo_wind_speed_10m_kmh',
-            'openmeteo_wind_direction_10m_degrees',
-            'openmeteo_wind_gusts_10m_kmh',
-            'openmeteo_shortwave_radiation_w_m2',
-            'openmeteo_sunshine_duration_s',
-            'openmeteo_vapour_pressure_deficit_kpa',
-            'openmeteo_is_day',
-            'openmeteo_wind_dir_sin',
-            'openmeteo_wind_dir_cos',
-            'tide_water_level_cm_nap',
-            'tide_delta_10min',
-            'rising_tide_flag',
-        ],
-    },
-    'all': {
-        'train': 'dataset/train_with_all_weather.csv',
-        'test': 'dataset/test_with_all_weather.csv',
-        'wind_speed_col': 'knmi_286_hourly_mean_wind_speed_mps',
-        'wind_speed_obs_col': 'knmi_286_wind_speed_at_observation_mps',
-        'wind_unit_factor': 1.0,
-        'weather_features': [
-            # KNMI features
-            'knmi_286_wind_direction_degrees',
-            'knmi_286_hourly_mean_wind_speed_mps',
-            'knmi_286_wind_speed_at_observation_mps',
-            'knmi_286_max_wind_gust_mps',
-            'knmi_286_air_temperature_c',
-            'knmi_286_dew_point_temperature_c',
-            'knmi_286_sunshine_duration_hours',
-            'knmi_286_global_radiation_j_cm2',
-            'knmi_286_precipitation_duration_hours',
-            'knmi_286_precipitation_amount_mm',
-            'knmi_286_relative_humidity_percent',
-            'knmi_286_weather_indicator_code',
-            'knmi_286_wind_dir_sin',
-            'knmi_286_wind_dir_cos',
-            'knmi_286_wind_dir_variable',
-            # OpenMeteo features
-            'openmeteo_air_temperature_2m_c',
-            'openmeteo_relative_humidity_2m_percent',
-            'openmeteo_dew_point_2m_c',
-            'openmeteo_precipitation_mm',
-            'openmeteo_cloud_cover_percent',
-            'openmeteo_pressure_msl_hpa',
-            'openmeteo_weather_code',
-            'openmeteo_wind_speed_10m_kmh',
-            'openmeteo_wind_direction_10m_degrees',
-            'openmeteo_wind_gusts_10m_kmh',
-            'openmeteo_shortwave_radiation_w_m2',
-            'openmeteo_sunshine_duration_s',
-            'openmeteo_vapour_pressure_deficit_kpa',
-            'openmeteo_is_day',
-            'openmeteo_wind_dir_sin',
-            'openmeteo_wind_dir_cos',
-        ],
-    },
+# Hard-wired mainline input files (no auto-detection, no fallbacks).
+TRAIN_DATA_PATH = 'dataset/train_with_openmeteo.csv'
+TEST_DATA_PATH = 'dataset/test_with_openmeteo.csv'
+
+ds = {
+    'train': TRAIN_DATA_PATH,
+    'test': TEST_DATA_PATH,
+    'wind_speed_col': 'openmeteo_wind_speed_10m_kmh',
+    'wind_speed_obs_col': 'openmeteo_wind_speed_10m_kmh',
+    'wind_unit_factor': 1 / 3.6,
+    'weather_features': [
+        'openmeteo_air_temperature_2m_c',
+        'openmeteo_relative_humidity_2m_percent',
+        'openmeteo_dew_point_2m_c',
+        'openmeteo_precipitation_mm',
+        'openmeteo_cloud_cover_percent',
+        'openmeteo_pressure_msl_hpa',
+        'openmeteo_weather_code',
+        'openmeteo_wind_speed_10m_kmh',
+        'openmeteo_wind_direction_10m_degrees',
+        'openmeteo_wind_gusts_10m_kmh',
+        'openmeteo_shortwave_radiation_w_m2',
+        'openmeteo_sunshine_duration_s',
+        'openmeteo_vapour_pressure_deficit_kpa',
+        'openmeteo_is_day',
+        'openmeteo_wind_dir_sin',
+        'openmeteo_wind_dir_cos',
+    ],
 }
 
-ds = DATASET_CONFIG[DATASET_VARIANT]
-print(f"Loading {DATASET_VARIANT} dataset...")
+print("Loading simplified Open-Meteo-only pipeline...")
 print(f"  train file: {ds['train']}")
 print(f"  test file:  {ds['test']}")
 if RUN_TUNE_CATBOOST and not USE_ENSEMBLE:
     print("Note: RUN_TUNE_CATBOOST requires USE_ENSEMBLE. CatBoost tuning will be skipped.")
 if RUN_GRID_SEARCH_CATBOOST and not USE_ENSEMBLE:
     print("Note: RUN_GRID_SEARCH_CATBOOST requires USE_ENSEMBLE. CatBoost grid search will be skipped.")
-if TIDE_ABLATION != 'tide_all' and DATASET_VARIANT != 'openmeteo_tide':
-    print("Note: TIDE_ABLATION applies only when DATASET_VARIANT=openmeteo_tide. Ignoring ablation choice.")
+print("Tide features disabled: simplified mainline does not include tide branches")
+print("Removed optional paths: confusion resolver, weak specialist blend, weak reweight")
 
 for required_path in [ds['train'], ds['test']]:
     if not Path(required_path).exists():
         raise FileNotFoundError(
-            f"Required dataset file not found: {required_path}. "
-            "Run join_openmeteo_tide.py first for openmeteo_tide experiments."
+            "Required mainline Open-Meteo file is missing: "
+            f"{required_path}. "
+            "This script only loads dataset/train_with_openmeteo.csv and "
+            "dataset/test_with_openmeteo.csv."
         )
+
+print("\n" + "="*70)
+print("CONTROLLED RUN: OPEN-METEO-ONLY")
+print("="*70)
+print(f"Train path: {ds['train']}")
+print(f"Test path:  {ds['test']}")
+print(f"Ensemble enabled: {USE_ENSEMBLE}")
+print(f"Two-stage enabled: {USE_TWO_STAGE}")
+print(f"Gull threshold: {GULL_THRESHOLD}")
+print(f"Undersample Gulls: {UNDERSAMPLE_GULLS}")
+print(f"RCS pack v1 enabled: {ENABLE_RCS_PACK_V1}")
+print(f"RCS pack v2 enabled: {ENABLE_RCS_PACK_V2}")
+print(f"Trajectory pack v1 enabled: {ENABLE_TRAJECTORY_PACK_V1}")
+print(f"Trajectory pack v1 mode: {TRAJECTORY_PACK_V1_MODE}")
+print("="*70 + "\n")
 
 train_df = pd.read_csv(ds['train']).set_index("track_id")
 test_df = pd.read_csv(ds['test']).set_index("track_id")
 print(f"Train: {train_df.shape}, Test: {test_df.shape}")
-if DATASET_VARIANT == 'openmeteo_tide':
-    print("Assumption: tide features were pre-merged using nearest merge_asof with ~10-15 min tolerance.")
-    print("Assumption: tide columns (tide_water_level_cm_nap, tide_delta_10min, rising_tide_flag) are present.")
 
 # ─────────────────────────────────────────────
 # 4. Trajectory Parsing & Feature Extraction
@@ -347,12 +252,65 @@ def trajectory_features(row):
         rcs_min = np.nan
         rcs_max = np.nan
         rcs_range = np.nan
+        rcs_p10 = np.nan
+        rcs_p50 = np.nan
+        rcs_p90 = np.nan
+        rcs_iqr = np.nan
+        rcs_diff_std = np.nan
+        rcs_tv_norm = np.nan
+        rcs_lag1_acf = np.nan
+        rcs_peakiness = np.nan
     else:
-        rcs_mean = np.nanmean(rcs_arr)
-        rcs_std = np.nanstd(rcs_arr)
-        rcs_min = np.nanmin(rcs_arr)
-        rcs_max = np.nanmax(rcs_arr)
+        valid_rcs = rcs_arr[~np.isnan(rcs_arr)]
+        rcs_mean = np.nanmean(valid_rcs)
+        rcs_std = np.nanstd(valid_rcs)
+        rcs_min = np.nanmin(valid_rcs)
+        rcs_max = np.nanmax(valid_rcs)
         rcs_range = rcs_max - rcs_min
+
+        # RCS sequence pack v1: compact temporal/distributional signal set.
+        rcs_p10 = np.nanpercentile(valid_rcs, 10)
+        rcs_p50 = np.nanpercentile(valid_rcs, 50)
+        rcs_p90 = np.nanpercentile(valid_rcs, 90)
+        rcs_q25 = np.nanpercentile(valid_rcs, 25)
+        rcs_q75 = np.nanpercentile(valid_rcs, 75)
+        rcs_iqr = rcs_q75 - rcs_q25
+
+        if len(valid_rcs) > 1:
+            rcs_diff = np.diff(valid_rcs)
+            rcs_diff_std = np.nanstd(rcs_diff)
+            rcs_tv_norm = np.nansum(np.abs(rcs_diff)) / (len(valid_rcs) - 1)
+        else:
+            rcs_diff_std = np.nan
+            rcs_tv_norm = np.nan
+
+        if len(valid_rcs) > 2 and np.nanstd(valid_rcs) > 1e-12:
+            lag_x = valid_rcs[:-1]
+            lag_y = valid_rcs[1:]
+            lag_x_std = np.nanstd(lag_x)
+            lag_y_std = np.nanstd(lag_y)
+            if lag_x_std > 1e-12 and lag_y_std > 1e-12:
+                rcs_lag1_acf = np.corrcoef(lag_x, lag_y)[0, 1]
+            else:
+                rcs_lag1_acf = 0.0
+        else:
+            rcs_lag1_acf = np.nan
+
+        rcs_peakiness = (rcs_p90 - rcs_p50) / (rcs_iqr + 1e-6)
+
+    # Trajectory behavior pack v1 features.
+    if len(bearings) > 0:
+        heading_stability_R = np.sqrt(np.mean(np.cos(bearings))**2 + np.mean(np.sin(bearings))**2)
+    else:
+        heading_stability_R = np.nan
+
+    turn_rate_p50 = np.nan
+    turn_rate_p90 = np.nan
+    frac_high_turn = np.nan
+    speed_p10 = np.nan
+    speed_p90 = np.nan
+    vz_p90_abs = np.nan
+    climb_descent_ratio = np.nan
 
     feats = {
         'n_points':       n,
@@ -368,6 +326,14 @@ def trajectory_features(row):
         'rcs_min':        rcs_min,
         'rcs_max':        rcs_max,
         'rcs_range':      rcs_range,
+        'rcs_p10':        rcs_p10,
+        'rcs_p50':        rcs_p50,
+        'rcs_p90':        rcs_p90,
+        'rcs_iqr':        rcs_iqr,
+        'rcs_diff_std':   rcs_diff_std,
+        'rcs_tv_norm':    rcs_tv_norm,
+        'rcs_lag1_acf':   rcs_lag1_acf,
+        'rcs_peakiness':  rcs_peakiness,
         'tortuosity':     bearing_changes.mean() if len(bearing_changes) > 0 else 0.0,
         'tortuosity_max': bearing_changes.max()  if len(bearing_changes) > 0 else 0.0,
         'straightness':       straightness,
@@ -394,8 +360,38 @@ def trajectory_features(row):
         feats['speed_mean'] = np.mean(speeds)
         feats['speed_std']  = np.std(speeds)
         feats['speed_max']  = np.max(speeds)
+        speed_p10 = np.nanpercentile(speeds, 10)
+        speed_p90 = np.nanpercentile(speeds, 90)
 
         feats['speed_cv'] = np.std(speeds) / (np.mean(speeds) + 1e-6)
+
+        # Turn rate from wrapped heading change over elapsed time.
+        if len(bearings) > 1:
+            turn_rate = bearing_changes / dt[1:]
+            abs_turn_rate = np.abs(turn_rate)
+            turn_rate_p50 = np.nanpercentile(abs_turn_rate, 50)
+            turn_rate_p90 = np.nanpercentile(abs_turn_rate, 90)
+            tr_q25 = np.nanpercentile(abs_turn_rate, 25)
+            tr_q75 = np.nanpercentile(abs_turn_rate, 75)
+            tr_iqr = tr_q75 - tr_q25
+            # Robust per-track threshold avoids brittle global constants.
+            high_turn_threshold = turn_rate_p50 + tr_iqr
+            frac_high_turn = np.mean(abs_turn_rate > high_turn_threshold)
+        else:
+            turn_rate_p50 = np.nan
+            turn_rate_p90 = np.nan
+            frac_high_turn = np.nan
+
+        if not np.all(np.isnan(alt_arr)) and len(alt_arr) > 1:
+            vz = np.diff(alt_arr) / dt
+            abs_vz = np.abs(vz)
+            vz_p90_abs = np.nanpercentile(abs_vz, 90)
+            climb_total = np.nansum(vz[vz > 0])
+            descent_total = np.nansum(np.abs(vz[vz < 0]))
+            climb_descent_ratio = climb_total / (descent_total + 1e-6)
+        else:
+            vz_p90_abs = np.nan
+            climb_descent_ratio = np.nan
 
         if len(speeds) > 1:
             accel = np.diff(speeds) / dt[1:]
@@ -411,6 +407,15 @@ def trajectory_features(row):
         feats['speed_cv']   = np.nan
         feats['accel_mean'] = np.nan
         feats['accel_std']  = np.nan
+
+    feats['turn_rate_p50'] = turn_rate_p50
+    feats['turn_rate_p90'] = turn_rate_p90
+    feats['frac_high_turn'] = frac_high_turn
+    feats['speed_p10'] = speed_p10
+    feats['speed_p90'] = speed_p90
+    feats['vz_p90_abs'] = vz_p90_abs
+    feats['climb_descent_ratio'] = climb_descent_ratio
+    feats['heading_stability_R'] = heading_stability_R
 
     return pd.Series(feats)
 
@@ -444,33 +449,10 @@ for df in [train_df, test_df]:
     df['headwind_component'] = df['airspeed'] - df[ds['wind_speed_obs_col']] * wf
     df['airspeed_wind_ratio'] = df['airspeed'] / (df[ds['wind_speed_col']] * wf + 0.1)
 
-    # Compute wind direction sin/cos for openmeteo (KNMI has them pre-computed)
-    if DATASET_VARIANT in ('openmeteo', 'openmeteo_tide', 'all'):
-        wd = df['openmeteo_wind_direction_10m_degrees']
-        df['openmeteo_wind_dir_sin'] = np.sin(2 * np.pi * wd / 360)
-        df['openmeteo_wind_dir_cos'] = np.cos(2 * np.pi * wd / 360)
-
-    # Optional compact metadata interaction pack (row-wise only)
-    if ENABLE_METADATA_INTERACTION_PACK:
-        if {'tide_water_level_cm_nap', 'hour_sin'}.issubset(df.columns):
-            df['tide_hour_sin'] = df['tide_water_level_cm_nap'] * df['hour_sin']
-        if {'tide_water_level_cm_nap', 'hour_cos'}.issubset(df.columns):
-            df['tide_hour_cos'] = df['tide_water_level_cm_nap'] * df['hour_cos']
-        if {'tide_delta_10min', 'hour_sin'}.issubset(df.columns):
-            df['tide_delta_hour_sin'] = df['tide_delta_10min'] * df['hour_sin']
-        if {'tide_delta_10min', 'hour_cos'}.issubset(df.columns):
-            df['tide_delta_hour_cos'] = df['tide_delta_10min'] * df['hour_cos']
-        if {'headwind_component', 'tide_delta_10min'}.issubset(df.columns):
-            df['headwind_tide_delta'] = df['headwind_component'] * df['tide_delta_10min']
-        if {'openmeteo_wind_gusts_10m_kmh', 'openmeteo_wind_speed_10m_kmh', 'tide_delta_10min'}.issubset(df.columns):
-            df['gustiness_tide_delta'] = (
-                (df['openmeteo_wind_gusts_10m_kmh'] - df['openmeteo_wind_speed_10m_kmh'])
-                * df['tide_delta_10min']
-            )
-        if {'rising_tide_flag', 'is_daytime'}.issubset(df.columns):
-            df['rising_night_interaction'] = df['rising_tide_flag'] * (1 - df['is_daytime'])
-        if {'openmeteo_precipitation_mm', 'tide_delta_10min'}.issubset(df.columns):
-            df['precip_tide_motion'] = df['openmeteo_precipitation_mm'] * np.abs(df['tide_delta_10min'])
+    # Compute wind direction sin/cos for Open-Meteo wind direction.
+    wd = df['openmeteo_wind_direction_10m_degrees']
+    df['openmeteo_wind_dir_sin'] = np.sin(2 * np.pi * wd / 360)
+    df['openmeteo_wind_dir_cos'] = np.cos(2 * np.pi * wd / 360)
 
 # Trajectory features
 print("Extracting trajectory features for train_df...")
@@ -500,75 +482,90 @@ trajectory_feats = [
     'accel_mean', 'accel_std',
 ]
 
+rcs_pack_v1_features = [
+    'rcs_p10',
+    'rcs_p50',
+    'rcs_p90',
+    'rcs_iqr',
+    'rcs_diff_std',
+    'rcs_tv_norm',
+    'rcs_lag1_acf',
+    'rcs_peakiness',
+]
+
+rcs_pack_v2_features = [
+    'rcs_diff_std',
+    'rcs_tv_norm',
+    'rcs_lag1_acf',
+    'rcs_peakiness',
+]
+
+trajectory_pack_v1_features = [
+    'turn_rate_p50',
+    'turn_rate_p90',
+    'frac_high_turn',
+    'speed_p10',
+    'speed_p90',
+    'vz_p90_abs',
+    'climb_descent_ratio',
+    'heading_stability_R',
+]
+
+trajectory_pack_v1_turn_features = [
+    'turn_rate_p50',
+    'turn_rate_p90',
+    'frac_high_turn',
+]
+trajectory_pack_v1_vertical_features = [
+    'vz_p90_abs',
+    'climb_descent_ratio',
+]
+
+if TRAJECTORY_PACK_V1_MODE == 'full':
+    trajectory_pack_v1_active_features = list(trajectory_pack_v1_features)
+elif TRAJECTORY_PACK_V1_MODE == 'no_turn':
+    trajectory_pack_v1_active_features = [
+        f for f in trajectory_pack_v1_features
+        if f not in trajectory_pack_v1_turn_features
+    ]
+elif TRAJECTORY_PACK_V1_MODE == 'no_vertical':
+    trajectory_pack_v1_active_features = [
+        f for f in trajectory_pack_v1_features
+        if f not in trajectory_pack_v1_vertical_features
+    ]
+elif TRAJECTORY_PACK_V1_MODE == 'drop_vz_p90_abs':
+    trajectory_pack_v1_active_features = [
+        f for f in trajectory_pack_v1_features
+        if f != 'vz_p90_abs'
+    ]
+else:  # drop_climb_descent_ratio
+    trajectory_pack_v1_active_features = [
+        f for f in trajectory_pack_v1_features
+        if f != 'climb_descent_ratio'
+    ]
+
+if ENABLE_RCS_PACK_V1:
+    trajectory_feats += rcs_pack_v1_features
+elif ENABLE_RCS_PACK_V2:
+    trajectory_feats += rcs_pack_v2_features
+
+if ENABLE_TRAJECTORY_PACK_V1:
+    trajectory_feats += trajectory_pack_v1_active_features
+
 weather_features = ds['weather_features']
 
-TIDE_FEATURES = ['tide_water_level_cm_nap', 'tide_delta_10min', 'rising_tide_flag']
-if DATASET_VARIANT == 'openmeteo_tide':
-    openmeteo_only_weather = [f for f in weather_features if f not in TIDE_FEATURES]
-    tide_feature_sets = {
-        'openmeteo_only': openmeteo_only_weather,
-        'tide_level': openmeteo_only_weather + ['tide_water_level_cm_nap'],
-        'tide_level_rising': openmeteo_only_weather + ['tide_water_level_cm_nap', 'rising_tide_flag'],
-        'tide_all': openmeteo_only_weather + TIDE_FEATURES,
-    }
-    weather_features = tide_feature_sets[TIDE_ABLATION]
-    print(f"Tide ablation mode: {TIDE_ABLATION}")
-    print(f"Selected weather features: {len(weather_features)}")
-
 metadata_interaction_features = []
-if ENABLE_METADATA_INTERACTION_PACK:
-    metadata_interaction_drop_set = set(METADATA_INTERACTION_DROP)
-    if metadata_interaction_drop_set:
-        print(
-            f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] drop list active: "
-            f"{sorted(metadata_interaction_drop_set)}"
-        )
+features = base_features + trajectory_feats + weather_features
 
-    active_feature_pool = set(base_features + trajectory_feats + weather_features)
-    for interaction_name, deps in METADATA_INTERACTION_FEATURE_SPECS:
-        if interaction_name in metadata_interaction_drop_set:
-            print(
-                f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] skipped {interaction_name}: "
-                "explicitly dropped by METADATA_INTERACTION_DROP"
-            )
-            continue
-
-        missing_in_data = [dep for dep in deps if dep not in train_df.columns or dep not in test_df.columns]
-        if missing_in_data:
-            print(
-                f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] skipped {interaction_name}: "
-                f"missing columns in data {missing_in_data}"
-            )
-            continue
-
-        inactive_deps = [dep for dep in deps if dep not in active_feature_pool]
-        if inactive_deps:
-            print(
-                f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] skipped {interaction_name}: "
-                f"dependencies not active in current feature setup {inactive_deps}"
-            )
-            continue
-
-        if interaction_name not in train_df.columns or interaction_name not in test_df.columns:
-            print(
-                f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] skipped {interaction_name}: "
-                "interaction not computed due to unavailable dependencies"
-            )
-            continue
-
-        metadata_interaction_features.append(interaction_name)
-
-    if metadata_interaction_features:
-        print(
-            f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] active features "
-            f"({len(metadata_interaction_features)}): {metadata_interaction_features}"
-        )
-    else:
-        print(f"Metadata interaction pack [{METADATA_INTERACTION_PACK_NAME}] enabled but no features are active")
-else:
-    print("Metadata interaction pack disabled")
-
-features = base_features + trajectory_feats + weather_features + metadata_interaction_features
+print("Active feature groups summary:")
+print(f"  base features: {len(base_features)}")
+print(f"  trajectory features: {len(trajectory_feats)}")
+print(f"  weather features: {len(weather_features)}")
+print(f"  rcs pack v1 features: {rcs_pack_v1_features if ENABLE_RCS_PACK_V1 else 'disabled'}")
+print(f"  rcs pack v2 features: {rcs_pack_v2_features if ENABLE_RCS_PACK_V2 else 'disabled'}")
+print(f"  trajectory pack v1 features: {trajectory_pack_v1_active_features if ENABLE_TRAJECTORY_PACK_V1 else 'disabled'}")
+print("  metadata interaction features: 0 (disabled in simplified mainline)")
+print(f"  total selected features: {len(features)}")
 
 missing_train = [f for f in features if f not in train_df.columns]
 missing_test = [f for f in features if f not in test_df.columns]
@@ -796,424 +793,6 @@ def compute_class_ap(oof_pred_df: pd.DataFrame, class_name: str) -> float:
         return np.nan
     oof_aligned_local = oof_pred_df.loc[solution_df_local.index, solution_df_local.columns]
     return average_precision_score(solution_df_local[class_name], oof_aligned_local[class_name])
-
-
-def apply_probability_reweight(prob_values, class_labels, class_weights):
-    """Apply class-wise multipliers to probabilities and renormalize rows."""
-    adjusted = np.array(prob_values, dtype=float, copy=True)
-    class_index = {cls: i for i, cls in enumerate(class_labels)}
-    for cls, mult in class_weights.items():
-        idx = class_index.get(cls)
-        if idx is not None:
-            adjusted[:, idx] *= mult
-
-    row_sums = adjusted.sum(axis=1, keepdims=True)
-    row_sums = np.where(row_sums <= 0, 1.0, row_sums)
-    return adjusted / row_sums
-
-
-def tune_weak_class_reweight(oof_pred_df, target_classes, candidate_multipliers):
-    """Tune weak-class multipliers on OOF predictions to improve macro AP."""
-    classes_local = list(oof_pred_df.columns)
-    valid_targets = [c for c in target_classes if c in classes_local]
-    baseline_map = compute_macro_map(oof_pred_df)
-
-    if not valid_targets:
-        return {}, baseline_map
-
-    print("\nOOF weak-class reweight search")
-    print(f"  target classes: {valid_targets}")
-    print(f"  candidate multipliers: {candidate_multipliers}")
-    print(f"  baseline mAP before reweight: {baseline_map:.4f}")
-
-    best_map = baseline_map
-    best_weights = {cls: 1.0 for cls in valid_targets}
-
-    for values in product(candidate_multipliers, repeat=len(valid_targets)):
-        weight_map = dict(zip(valid_targets, values))
-        adjusted = apply_probability_reweight(oof_pred_df.values, classes_local, weight_map)
-        adjusted_df = pd.DataFrame(adjusted, index=oof_pred_df.index, columns=oof_pred_df.columns)
-        score = compute_macro_map(adjusted_df)
-        if score > best_map + 1e-9:
-            best_map = score
-            best_weights = weight_map
-
-    if best_map <= baseline_map + 1e-9:
-        print("  no mAP gain found; skipping weak-class reweight")
-        return {}, baseline_map
-
-    print(f"  best reweighted mAP: {best_map:.4f}")
-    print(f"  chosen multipliers: {best_weights}")
-    return best_weights, best_map
-
-
-def run_weak_specialist_cv(X, y, split, X_test, target_classes, imputer_template):
-    """Train weak-class one-vs-rest specialists and return OOF/test probabilities."""
-    available = set(np.unique(y))
-    valid_targets = [c for c in target_classes if c in available]
-    if not valid_targets:
-        return pd.DataFrame(index=X.index), pd.DataFrame(index=X_test.index)
-
-    print("\nWeak-class specialist CV")
-    print(f"  target classes: {valid_targets}")
-
-    specialist_oof = pd.DataFrame(0.0, index=X.index, columns=valid_targets)
-    specialist_test = pd.DataFrame(0.0, index=X_test.index, columns=valid_targets)
-
-    for cls in valid_targets:
-        cls_oof = np.zeros(len(X), dtype=float)
-        cls_test = np.zeros(len(X_test), dtype=float)
-        fold_binary_ap = []
-
-        for i, (train_idx, val_idx) in enumerate(split):
-            y_train_bin = (y.iloc[train_idx] == cls).astype(int)
-            y_val_bin = (y.iloc[val_idx] == cls).astype(int)
-
-            # Safety fallback in case a fold has only one class.
-            if y_train_bin.nunique() < 2:
-                prior = float(y_train_bin.mean())
-                val_prob = np.full(len(val_idx), prior, dtype=float)
-                test_prob = np.full(len(X_test), prior, dtype=float)
-            else:
-                specialist_model = LGBMClassifier(
-                    n_estimators=WEAK_SPECIALIST_N_ESTIMATORS,
-                    learning_rate=LEARNING_RATE,
-                    num_leaves=max(31, NUM_LEAVES // 2),
-                    min_child_samples=max(10, MIN_CHILD_SAMPLES),
-                    subsample=SUBSAMPLE,
-                    colsample_bytree=COLSAMPLE_BYTREE,
-                    class_weight={0: 1.0, 1: WEAK_SPECIALIST_POS_WEIGHT},
-                    random_state=RANDOM_STATE + i,
-                    device_type='cpu',
-                    n_jobs=-1,
-                    verbose=-1,
-                )
-                specialist_pipe = ImbPipeline([
-                    ('imputer', clone(imputer_template)),
-                    ('oversampler', 'passthrough'),
-                    ('model', specialist_model),
-                ])
-                specialist_pipe.fit(X.iloc[train_idx], y_train_bin)
-                val_prob = specialist_pipe.predict_proba(X.iloc[val_idx])[:, 1]
-                test_prob = specialist_pipe.predict_proba(X_test)[:, 1]
-
-            cls_oof[val_idx] = val_prob
-            cls_test += test_prob
-
-            if y_val_bin.sum() > 0:
-                fold_binary_ap.append(average_precision_score(y_val_bin, val_prob))
-
-        cls_test /= len(split)
-        specialist_oof[cls] = cls_oof
-        specialist_test[cls] = cls_test
-
-        if fold_binary_ap:
-            print(f"  {cls:20s}: mean binary AP {np.mean(fold_binary_ap):.4f}")
-        else:
-            print(f"  {cls:20s}: no positive validation folds")
-
-    return specialist_oof, specialist_test
-
-
-def apply_specialist_blend(prob_values, class_labels, specialist_values, blend_weights):
-    """Blend specialist class probabilities into multiclass predictions and renormalize."""
-    adjusted = np.array(prob_values, dtype=float, copy=True)
-    class_index = {cls: i for i, cls in enumerate(class_labels)}
-
-    for cls, alpha in blend_weights.items():
-        idx = class_index.get(cls)
-        if idx is None:
-            continue
-        if cls not in specialist_values.columns:
-            continue
-        alpha = float(np.clip(alpha, 0.0, 1.0))
-        adjusted[:, idx] = (1.0 - alpha) * adjusted[:, idx] + alpha * specialist_values[cls].values
-
-    row_sums = adjusted.sum(axis=1, keepdims=True)
-    row_sums = np.where(row_sums <= 0, 1.0, row_sums)
-    return adjusted / row_sums
-
-
-def tune_specialist_blend(oof_pred_df, specialist_oof_df, target_classes, alpha_grid):
-    """Tune specialist blend weights on OOF predictions for macro AP."""
-    valid_targets = [
-        c for c in target_classes
-        if c in oof_pred_df.columns and c in specialist_oof_df.columns
-    ]
-    baseline_map = compute_macro_map(oof_pred_df)
-
-    if not valid_targets:
-        return {}, baseline_map
-
-    print("\nOOF specialist blend search")
-    print(f"  target classes: {valid_targets}")
-    print(f"  alpha grid: {alpha_grid}")
-    print(f"  baseline mAP before specialist blend: {baseline_map:.4f}")
-
-    best_map = baseline_map
-    best_weights = {cls: 0.0 for cls in valid_targets}
-
-    for values in product(alpha_grid, repeat=len(valid_targets)):
-        alpha_map = dict(zip(valid_targets, values))
-        blended = apply_specialist_blend(
-            oof_pred_df.values,
-            list(oof_pred_df.columns),
-            specialist_oof_df,
-            alpha_map,
-        )
-        blended_df = pd.DataFrame(blended, index=oof_pred_df.index, columns=oof_pred_df.columns)
-        score = compute_macro_map(blended_df)
-        if score > best_map + 1e-9:
-            best_map = score
-            best_weights = alpha_map
-
-    if best_map <= baseline_map + 1e-9:
-        print("  no mAP gain found; skipping specialist blend")
-        return {}, baseline_map
-
-    print(f"  best specialist-blended mAP: {best_map:.4f}")
-    print(f"  chosen blend weights: {best_weights}")
-    return best_weights, best_map
-
-
-def build_confusion_sets_from_oof(oof_pred_df, y_true, target_classes, topk=2):
-    """Build small confusion sets from false-negative absorption on OOF predictions."""
-    confusion_sets = {}
-    for weak_cls in target_classes:
-        if weak_cls not in oof_pred_df.columns:
-            continue
-
-        weak_rows = oof_pred_df.loc[y_true == weak_cls]
-        if weak_rows.empty:
-            continue
-
-        pred_top1 = weak_rows.idxmax(axis=1)
-        fn_rows = weak_rows.loc[pred_top1 != weak_cls]
-        if fn_rows.empty:
-            fn_rows = weak_rows
-
-        absorption = (
-            fn_rows.drop(columns=[weak_cls], errors='ignore')
-            .sum(axis=0)
-            .sort_values(ascending=False)
-        )
-        top_confusions = [c for c in absorption.index if c != weak_cls][:topk]
-        set_classes = [weak_cls] + top_confusions
-
-        if len(set_classes) >= 2:
-            confusion_sets[weak_cls] = set_classes
-
-    return confusion_sets
-
-
-def compute_trigger_mask(prob_values, class_labels, confusion_set, margin_threshold):
-    """Trigger when top-2 classes are both inside set and top1-top2 margin is small."""
-    n_rows = len(prob_values)
-    if n_rows == 0:
-        return np.zeros(0, dtype=bool), np.zeros(0, dtype=float)
-
-    top2_idx = np.argpartition(prob_values, -2, axis=1)[:, -2:]
-    top2_vals = np.take_along_axis(prob_values, top2_idx, axis=1)
-    order = np.argsort(top2_vals, axis=1)
-    top1_idx = top2_idx[np.arange(n_rows), order[:, 1]]
-    top2_idx_ordered = top2_idx[np.arange(n_rows), order[:, 0]]
-
-    top1_vals = prob_values[np.arange(n_rows), top1_idx]
-    top2_vals = prob_values[np.arange(n_rows), top2_idx_ordered]
-    margins = top1_vals - top2_vals
-
-    class_to_idx = {cls: i for i, cls in enumerate(class_labels)}
-    set_indices = [class_to_idx[c] for c in confusion_set if c in class_to_idx]
-    if not set_indices:
-        return np.zeros(n_rows, dtype=bool), margins
-
-    trigger_mask = (
-        np.isin(top1_idx, set_indices)
-        & np.isin(top2_idx_ordered, set_indices)
-        & (margins < margin_threshold)
-    )
-    return trigger_mask, margins
-
-
-def apply_confusion_resolver_blend(prob_values, class_labels, confusion_set, resolver_probs, trigger_mask, alpha):
-    """Preserve set mass and partially blend resolver distribution inside confusion set."""
-    adjusted = np.array(prob_values, dtype=float, copy=True)
-    if adjusted.shape[0] == 0 or not np.any(trigger_mask):
-        return adjusted
-
-    class_to_idx = {cls: i for i, cls in enumerate(class_labels)}
-    set_indices = [class_to_idx[c] for c in confusion_set if c in class_to_idx]
-    if len(set_indices) < 2:
-        return adjusted
-
-    trigger_rows = np.where(trigger_mask)[0]
-    base_set = adjusted[np.ix_(trigger_rows, set_indices)]
-    set_mass = base_set.sum(axis=1, keepdims=True)
-
-    resolver_set = np.clip(resolver_probs[trigger_rows], 1e-12, None)
-    resolver_set = resolver_set / resolver_set.sum(axis=1, keepdims=True)
-    target_set = resolver_set * set_mass
-
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    blended_set = (1.0 - alpha) * base_set + alpha * target_set
-    adjusted[np.ix_(trigger_rows, set_indices)] = blended_set
-    return adjusted
-
-
-def train_confusion_resolver_cv(
-    X,
-    y,
-    split,
-    X_test,
-    oof_pred_df,
-    test_pred_values,
-    confusion_sets,
-    class_labels,
-    imputer_template,
-    model_type='logreg',
-):
-    """Train one resolver per confusion set and return OOF/test set-wise probabilities."""
-    if model_type != 'logreg':
-        raise ValueError(f"Unsupported resolver_model_type: {model_type}")
-
-    class_labels = list(class_labels)
-    stage1_oof = oof_pred_df[class_labels].values
-    stage1_test = np.array(test_pred_values, dtype=float, copy=True)
-
-    # Stage-1 uncertainty signals used by resolver features.
-    oof_sorted = np.sort(stage1_oof, axis=1)
-    test_sorted = np.sort(stage1_test, axis=1)
-    oof_margin = oof_sorted[:, -1] - oof_sorted[:, -2]
-    test_margin = test_sorted[:, -1] - test_sorted[:, -2]
-    oof_entropy = -(stage1_oof * np.log(np.clip(stage1_oof, 1e-12, 1.0))).sum(axis=1)
-    test_entropy = -(stage1_test * np.log(np.clip(stage1_test, 1e-12, 1.0))).sum(axis=1)
-
-    resolver_outputs = {}
-
-    for weak_cls, set_classes in confusion_sets.items():
-        set_indices = [class_labels.index(c) for c in set_classes if c in class_labels]
-        if len(set_indices) < 2:
-            continue
-
-        label_map = {cls: i for i, cls in enumerate(set_classes)}
-        y_in_set = y.isin(set_classes)
-        if y_in_set.sum() < max(20, len(set_classes) * 6):
-            print(f"  resolver [{weak_cls}] skipped: too few in-set samples")
-            continue
-
-        set_oof_stage1 = stage1_oof[:, set_indices]
-        set_test_stage1 = stage1_test[:, set_indices]
-
-        # Neutral fallback: if a fold cannot train a resolver, keep set distribution close to Stage-1.
-        set_oof_pred = np.clip(set_oof_stage1, 1e-12, None)
-        oof_set_sum = set_oof_pred.sum(axis=1, keepdims=True)
-        bad_oof_sum = (oof_set_sum[:, 0] <= 0)
-        if np.any(bad_oof_sum):
-            set_oof_pred[bad_oof_sum] = 1.0 / len(set_classes)
-            oof_set_sum = set_oof_pred.sum(axis=1, keepdims=True)
-        set_oof_pred = set_oof_pred / oof_set_sum
-
-        set_test_pred_accum = np.zeros((len(X_test), len(set_classes)), dtype=float)
-        valid_folds = 0
-
-        for i, (train_idx, val_idx) in enumerate(split):
-            train_idx = np.asarray(train_idx)
-            val_idx = np.asarray(val_idx)
-
-            # Fold-safe preprocessing to avoid validation-fold leakage.
-            fold_preprocessor = clone(imputer_template)
-            X_train_fold_base = fold_preprocessor.fit_transform(X.iloc[train_idx], y.iloc[train_idx])
-            X_val_fold_base = fold_preprocessor.transform(X.iloc[val_idx])
-            X_test_fold_base = fold_preprocessor.transform(X_test)
-
-            if hasattr(X_train_fold_base, 'toarray'):
-                X_train_fold_base = X_train_fold_base.toarray()
-            if hasattr(X_val_fold_base, 'toarray'):
-                X_val_fold_base = X_val_fold_base.toarray()
-            if hasattr(X_test_fold_base, 'toarray'):
-                X_test_fold_base = X_test_fold_base.toarray()
-
-            train_set_mask = y.iloc[train_idx].isin(set_classes).values
-            if train_set_mask.sum() < len(set_classes) * 2:
-                continue
-
-            y_train_set = y.iloc[train_idx][train_set_mask].map(label_map).to_numpy()
-            prior = np.bincount(y_train_set, minlength=len(set_classes)).astype(float)
-            if prior.sum() <= 0:
-                prior = np.ones(len(set_classes), dtype=float)
-            prior = prior / prior.sum()
-
-            X_train_set = np.hstack([
-                X_train_fold_base[train_set_mask],
-                set_oof_stage1[train_idx][train_set_mask],
-                oof_margin[train_idx][train_set_mask].reshape(-1, 1),
-                oof_entropy[train_idx][train_set_mask].reshape(-1, 1),
-            ])
-            X_val_all = np.hstack([
-                X_val_fold_base,
-                set_oof_stage1[val_idx],
-                oof_margin[val_idx].reshape(-1, 1),
-                oof_entropy[val_idx].reshape(-1, 1),
-            ])
-            X_test_all = np.hstack([
-                X_test_fold_base,
-                set_test_stage1,
-                test_margin.reshape(-1, 1),
-                test_entropy.reshape(-1, 1),
-            ])
-
-            if np.unique(y_train_set).size < 2:
-                val_local = np.tile(prior, (len(val_idx), 1))
-                test_local = np.tile(prior, (len(X_test), 1))
-            else:
-                model = LogisticRegression(
-                    C=0.5,
-                    penalty='l2',
-                    solver='lbfgs',
-                    multi_class='multinomial',
-                    class_weight='balanced',
-                    max_iter=500,
-                    random_state=RANDOM_STATE + i,
-                )
-                model.fit(X_train_set, y_train_set)
-
-                val_raw = model.predict_proba(X_val_all)
-                test_raw = model.predict_proba(X_test_all)
-                val_local = np.zeros((len(val_idx), len(set_classes)), dtype=float)
-                test_local = np.zeros((len(X_test), len(set_classes)), dtype=float)
-                val_local[:, model.classes_.astype(int)] = val_raw
-                test_local[:, model.classes_.astype(int)] = test_raw
-
-                val_sum = val_local.sum(axis=1, keepdims=True)
-                bad_val = (val_sum[:, 0] <= 0)
-                if np.any(bad_val):
-                    val_local[bad_val] = prior
-                    val_sum = val_local.sum(axis=1, keepdims=True)
-                val_local = val_local / val_sum
-
-                test_sum = test_local.sum(axis=1, keepdims=True)
-                bad_test = (test_sum[:, 0] <= 0)
-                if np.any(bad_test):
-                    test_local[bad_test] = prior
-                    test_sum = test_local.sum(axis=1, keepdims=True)
-                test_local = test_local / test_sum
-
-            set_oof_pred[val_idx] = val_local
-            set_test_pred_accum += test_local
-            valid_folds += 1
-
-        if valid_folds == 0:
-            print(f"  resolver [{weak_cls}] skipped: no valid folds")
-            continue
-
-        set_test_pred = set_test_pred_accum / valid_folds
-        resolver_outputs[weak_cls] = {
-            'classes': set_classes,
-            'oof_proba': set_oof_pred,
-            'test_proba': set_test_pred,
-        }
-
-    return resolver_outputs
 
 
 def build_sampled_grid(search_space, max_configs, seed):
@@ -1647,202 +1226,6 @@ if USE_TWO_STAGE:
     print("\n  Ensembled with base model (simple average)")
 
 # ─────────────────────────────────────────────
-# 8e. Optional Confusion-Set Resolver (Experiment A)
-# ─────────────────────────────────────────────
-if ENABLE_CONFUSION_RESOLVER:
-    print("\n" + "=" * 50)
-    print("CONFUSION-SET RESOLVER")
-    print("=" * 50)
-
-    resolver_baseline_map = compute_macro_map(oof_preds)
-    resolver_baseline_ap = {
-        cls: compute_class_ap(oof_preds, cls)
-        for cls in CONFUSION_TARGET_CLASSES
-        if cls in oof_preds.columns
-    }
-
-    confusion_sets = build_confusion_sets_from_oof(
-        oof_preds,
-        y,
-        CONFUSION_TARGET_CLASSES,
-        topk=CONFUSION_TOPK,
-    )
-
-    if not confusion_sets:
-        print("  no confusion sets found from OOF; skipping resolver")
-    else:
-        print("  confusion sets from OOF false-negative absorption:")
-        for weak_cls, set_classes in confusion_sets.items():
-            print(f"    {weak_cls}: {set_classes}")
-
-        resolver_outputs = train_confusion_resolver_cv(
-            X,
-            y,
-            split,
-            X_test,
-            oof_preds,
-            test_preds,
-            confusion_sets,
-            classes,
-            imputer,
-            model_type=RESOLVER_MODEL_TYPE,
-        )
-
-        if not resolver_outputs:
-            print("  resolver produced no valid models; skipping blend")
-        else:
-            stage1_oof_values = oof_preds.values.copy()
-            stage1_test_values = np.array(test_preds, dtype=float, copy=True)
-            blended_oof_values = stage1_oof_values.copy()
-            blended_test_values = stage1_test_values.copy()
-
-            claimed_oof_triggers = np.zeros(len(oof_preds), dtype=bool)
-            claimed_test_triggers = np.zeros(len(stage1_test_values), dtype=bool)
-
-            for weak_cls, payload in resolver_outputs.items():
-                set_classes = payload['classes']
-
-                oof_trigger_raw, _ = compute_trigger_mask(
-                    stage1_oof_values,
-                    list(classes),
-                    set_classes,
-                    RESOLVER_MARGIN_THRESHOLD,
-                )
-                test_trigger_raw, _ = compute_trigger_mask(
-                    stage1_test_values,
-                    list(classes),
-                    set_classes,
-                    RESOLVER_MARGIN_THRESHOLD,
-                )
-
-                # Deterministic guardrail: each row can be handled by at most one resolver set.
-                oof_trigger_mask = oof_trigger_raw & ~claimed_oof_triggers
-                test_trigger_mask = test_trigger_raw & ~claimed_test_triggers
-                claimed_oof_triggers |= oof_trigger_mask
-                claimed_test_triggers |= test_trigger_mask
-
-                oof_raw_count = int(oof_trigger_raw.sum())
-                test_raw_count = int(test_trigger_raw.sum())
-                oof_trigger_count = int(oof_trigger_mask.sum())
-                test_trigger_count = int(test_trigger_mask.sum())
-                print(
-                    f"  resolver set [{weak_cls}] trigger count: "
-                    f"OOF applied {oof_trigger_count}/{len(oof_trigger_mask)} "
-                    f"({oof_trigger_count / max(1, len(oof_trigger_mask)):.2%}), "
-                    f"test applied {test_trigger_count}/{len(test_trigger_mask)} "
-                    f"({test_trigger_count / max(1, len(test_trigger_mask)):.2%})"
-                )
-                print(
-                    f"    raw trigger count before overlap guard: "
-                    f"OOF {oof_raw_count}, test {test_raw_count}"
-                )
-
-                blended_oof_values = apply_confusion_resolver_blend(
-                    blended_oof_values,
-                    list(classes),
-                    set_classes,
-                    payload['oof_proba'],
-                    oof_trigger_mask,
-                    RESOLVER_ALPHA,
-                )
-                blended_test_values = apply_confusion_resolver_blend(
-                    blended_test_values,
-                    list(classes),
-                    set_classes,
-                    payload['test_proba'],
-                    test_trigger_mask,
-                    RESOLVER_ALPHA,
-                )
-
-            total_trigger_count = int(claimed_oof_triggers.sum())
-            print(
-                f"  overall trigger count: {total_trigger_count}/{len(claimed_oof_triggers)} "
-                f"({total_trigger_count / max(1, len(claimed_oof_triggers)):.2%})"
-            )
-
-            oof_row_sums = blended_oof_values.sum(axis=1)
-            test_row_sums = blended_test_values.sum(axis=1)
-            print(
-                "  probability-sum check "
-                f"OOF min/max: {oof_row_sums.min():.6f}/{oof_row_sums.max():.6f}, "
-                f"test min/max: {test_row_sums.min():.6f}/{test_row_sums.max():.6f}"
-            )
-            print(
-                "  probability-min check "
-                f"OOF min: {blended_oof_values.min():.6f}, "
-                f"test min: {blended_test_values.min():.6f}"
-            )
-
-            oof_preds = pd.DataFrame(blended_oof_values, index=oof_preds.index, columns=oof_preds.columns)
-            test_preds = blended_test_values
-
-            resolver_new_map = compute_macro_map(oof_preds)
-            resolver_delta = resolver_new_map - resolver_baseline_map
-            print(
-                f"  CV mAP delta after resolver: {resolver_new_map:.4f} "
-                f"({resolver_delta:+.4f} vs stage-1 baseline {resolver_baseline_map:.4f})"
-            )
-
-            for cls in CONFUSION_TARGET_CLASSES:
-                if cls in resolver_baseline_ap and not np.isnan(resolver_baseline_ap[cls]):
-                    new_ap = compute_class_ap(oof_preds, cls)
-                    print(
-                        f"  AP delta {cls}: {new_ap:.4f} "
-                        f"({new_ap - resolver_baseline_ap[cls]:+.4f})"
-                    )
-
-# ─────────────────────────────────────────────
-# 8f. Optional Weak-Class Specialist Blending
-# ─────────────────────────────────────────────
-if USE_WEAK_SPECIALIST_BLEND:
-    specialist_oof, specialist_test = run_weak_specialist_cv(
-        X,
-        y,
-        split,
-        X_test,
-        WEAK_SPECIALIST_CLASSES,
-        imputer,
-    )
-    specialist_weights, _ = tune_specialist_blend(
-        oof_preds,
-        specialist_oof,
-        WEAK_SPECIALIST_CLASSES,
-        WEAK_SPECIALIST_ALPHA_GRID,
-    )
-    if specialist_weights:
-        oof_specialist = apply_specialist_blend(
-            oof_preds.values,
-            list(oof_preds.columns),
-            specialist_oof,
-            specialist_weights,
-        )
-        test_specialist = apply_specialist_blend(
-            test_preds,
-            list(classes),
-            specialist_test,
-            specialist_weights,
-        )
-        oof_preds = pd.DataFrame(oof_specialist, index=oof_preds.index, columns=oof_preds.columns)
-        test_preds = test_specialist
-        print("  Applied weak-class specialist blending to OOF and test predictions")
-
-# ─────────────────────────────────────────────
-# 8g. Optional OOF Weak-Class Reweighting
-# ─────────────────────────────────────────────
-if USE_OOF_WEAK_REWEIGHT:
-    weak_weights, _ = tune_weak_class_reweight(
-        oof_preds,
-        WEAK_REWEIGHT_CLASSES,
-        WEAK_REWEIGHT_GRID,
-    )
-    if weak_weights:
-        oof_adjusted = apply_probability_reweight(oof_preds.values, list(oof_preds.columns), weak_weights)
-        test_adjusted = apply_probability_reweight(test_preds, list(classes), weak_weights)
-        oof_preds = pd.DataFrame(oof_adjusted, index=oof_preds.index, columns=oof_preds.columns)
-        test_preds = test_adjusted
-        print("  Applied weak-class probability reweighting to OOF and test predictions")
-
-# ─────────────────────────────────────────────
 # 9. Evaluation
 # ─────────────────────────────────────────────
 needed_columns = COMPETITION_CLASS_ORDER
@@ -1873,6 +1256,519 @@ for cls in needed_columns:
     if cls in solution_df.columns and cls in oof_aligned.columns:
         ap = average_precision_score(solution_df[cls], oof_aligned[cls])
         print(f"   {cls:20s}: {ap:.4f}")
+
+# ─────────────────────────────────────────────
+# 9b. WEAK-CLASS DIAGNOSTICS (Cormorants & Waders)
+# ─────────────────────────────────────────────
+
+# Create diagnostics directory
+diag_dir = Path('diagnostics')
+diag_dir.mkdir(exist_ok=True)
+
+def analyze_false_negatives(solution_df, oof_aligned, target_class, classes_list):
+    """
+    For rows where true label = target_class but prediction is wrong,
+    count which predicted classes absorbed them most often.
+    Returns: DataFrame with top 5 predicted classes, counts, and percentages.
+    """
+    # Get true positives for target class
+    solution_target = solution_df[target_class]
+    pred_target = oof_aligned[target_class]
+    
+    # Rows where true label is target class
+    true_mask = solution_target == 1
+    if true_mask.sum() == 0:
+        return pd.DataFrame({'predicted_class': [], 'count': [], 'percentage': []})
+    
+    # Among those rows, find where the target class is NOT the top prediction
+    # (i.e., false negatives)
+    predicted_classes = oof_aligned.loc[true_mask].idxmax(axis=1)
+    true_predictions = predicted_classes == target_class
+    false_negatives = predicted_classes[~true_predictions]
+    
+    if len(false_negatives) == 0:
+        return pd.DataFrame({'predicted_class': [], 'count': [], 'percentage': []})
+    
+    # Count which classes absorbed the false negatives
+    absorption = false_negatives.value_counts()
+    absorption_df = pd.DataFrame({
+        'predicted_class': absorption.index,
+        'count': absorption.values,
+        'percentage': (100 * absorption.values / len(false_negatives)).round(1)
+    }).reset_index(drop=True)
+    
+    return absorption_df.head(5)
+
+
+def analyze_false_positives(solution_df, oof_aligned, target_class, classes_list):
+    """
+    For rows where predicted label = target_class but true label is different,
+    count which true classes are most often being mistaken as the target.
+    Returns: DataFrame with top 5 source classes, counts, and percentages.
+    """
+    # Rows where target class is the top prediction
+    predicted_top = oof_aligned.idxmax(axis=1)
+    pred_mask = predicted_top == target_class
+    
+    if pred_mask.sum() == 0:
+        return pd.DataFrame({'true_class': [], 'count': [], 'percentage': []})
+    
+    # Among those, find where the true label is NOT target class (false positives)
+    true_classes = solution_df.loc[pred_mask].idxmax(axis=1)
+    true_match = true_classes == target_class
+    false_positives = true_classes[~true_match]
+    
+    if len(false_positives) == 0:
+        return pd.DataFrame({'true_class': [], 'count': [], 'percentage': []})
+    
+    # Count which true classes were mistaken for target
+    sources = false_positives.value_counts()
+    sources_df = pd.DataFrame({
+        'true_class': sources.index,
+        'count': sources.values,
+        'percentage': (100 * sources.values / len(false_positives)).round(1)
+    }).reset_index(drop=True)
+    
+    return sources_df.head(5)
+
+
+def analyze_topk_probability(solution_df, oof_aligned, target_class):
+    """
+    For rows where true label = target_class:
+    - Compute how often target class appears in top 1, top 2, top 3
+    - Report average probability assigned to target class on correct/incorrect predictions
+    Returns: dict with diagnostics.
+    """
+    solution_target = solution_df[target_class]
+    pred_target = oof_aligned[target_class]
+    
+    # Rows where true label is target class
+    true_mask = solution_target == 1
+    if true_mask.sum() == 0:
+        return {}
+    
+    # Get rankings and probabilities for those rows
+    pred_proba_subset = oof_aligned.loc[true_mask]
+    pred_target_subset = pred_target[true_mask]
+    
+    # Top-k rankings
+    ranked = pred_proba_subset.rank(axis=1, method='min', ascending=False)
+    
+    top1_count = (ranked[target_class] == 1).sum()
+    top2_count = (ranked[target_class] <= 2).sum()
+    top3_count = (ranked[target_class] <= 3).sum()
+    total = len(pred_proba_subset)
+    
+    # Predictions correctness
+    predicted_classes = pred_proba_subset.idxmax(axis=1)
+    is_correct = (predicted_classes == target_class)
+    
+    # Average probability
+    if is_correct.sum() > 0:
+        avg_prob_correct = pred_target_subset[is_correct].mean()
+    else:
+        avg_prob_correct = 0.0
+    
+    if (~is_correct).sum() > 0:
+        avg_prob_incorrect = pred_target_subset[~is_correct].mean()
+    else:
+        avg_prob_incorrect = 0.0
+    
+    return {
+        'total_true_instances': total,
+        'top1_count': top1_count,
+        'top1_pct': round(100 * top1_count / total, 1),
+        'top2_count': top2_count,
+        'top2_pct': round(100 * top2_count / total, 1),
+        'top3_count': top3_count,
+        'top3_pct': round(100 * top3_count / total, 1),
+        'avg_prob_on_correct': round(avg_prob_correct, 4) if is_correct.sum() > 0 else None,
+        'avg_prob_on_incorrect': round(avg_prob_incorrect, 4) if (~is_correct).sum() > 0 else None,
+        'n_correct': is_correct.sum(),
+        'n_incorrect': (~is_correct).sum(),
+    }
+
+
+def analyze_gull_overlap(solution_df, oof_aligned, target_class='Cormorants', classes_list=None):
+    """
+    For target class (default Cormorants):
+    - Among false negatives for target, percentage predicted as Gulls
+    For Gulls:
+    - Among true Gull instances, how often target class appears in top 2 or top 3
+    Returns: dict with diagnostics.
+    """
+    if classes_list is None:
+        classes_list = list(oof_aligned.columns)
+    
+    result = {}
+    
+    # Target class false negatives → Gulls
+    solution_target = solution_df[target_class]
+    true_mask = solution_target == 1
+    if true_mask.sum() > 0:
+        predicted_classes = oof_aligned.loc[true_mask].idxmax(axis=1)
+        true_predictions = predicted_classes == target_class
+        false_negatives_mask = ~true_predictions
+        
+        if false_negatives_mask.sum() > 0:
+            fn_as_gulls = (predicted_classes[false_negatives_mask] == 'Gulls').sum()
+            fn_pct_as_gulls = round(100 * fn_as_gulls / false_negatives_mask.sum(), 1)
+            result[f'{target_class}_fn_as_gulls_count'] = fn_as_gulls
+            result[f'{target_class}_fn_as_gulls_pct'] = fn_pct_as_gulls
+            result[f'{target_class}_total_fn'] = false_negatives_mask.sum()
+    
+    # Gulls true instances → target in top-2 or top-3
+    solution_gull = solution_df['Gulls']
+    gull_true_mask = solution_gull == 1
+    if gull_true_mask.sum() > 0:
+        pred_gull_subset = oof_aligned.loc[gull_true_mask]
+        ranked = pred_gull_subset.rank(axis=1, method='min', ascending=False)
+        
+        top2_count = (ranked[target_class] <= 2).sum()
+        top3_count = (ranked[target_class] <= 3).sum()
+        
+        top2_pct = round(100 * top2_count / gull_true_mask.sum(), 1)
+        top3_pct = round(100 * top3_count / gull_true_mask.sum(), 1)
+        
+        result[f'{target_class}_in_gull_top2_count'] = top2_count
+        result[f'{target_class}_in_gull_top2_pct'] = top2_pct
+        result[f'{target_class}_in_gull_top3_count'] = top3_count
+        result[f'{target_class}_in_gull_top3_pct'] = top3_pct
+        result['gull_total_true_instances'] = gull_true_mask.sum()
+    
+    return result
+
+
+def analyze_waders_posthoc(solution_df, oof_aligned, needed_columns):
+    """
+    Baseline-only post-hoc diagnostics for Waders:
+    - Ranking gap: top-2/top-3 but not top-1 for true Waders rows.
+    - Plausibility of small score adjustments via simple multipliers.
+    - Impact on Waders AP and overall macro AP without retraining.
+    """
+    target = 'Waders'
+    if target not in oof_aligned.columns or target not in solution_df.columns:
+        return None, pd.DataFrame()
+
+    true_mask = solution_df[target] == 1
+    if true_mask.sum() == 0:
+        return None, pd.DataFrame()
+
+    ranked_true = oof_aligned.loc[true_mask].rank(axis=1, method='min', ascending=False)
+    top1 = (ranked_true[target] == 1).sum()
+    top2 = (ranked_true[target] <= 2).sum()
+    top3 = (ranked_true[target] <= 3).sum()
+    total = int(true_mask.sum())
+
+    # These are the key ranking-gap diagnostics requested.
+    top2_not_top1 = top2 - top1
+    top3_not_top1 = top3 - top1
+
+    summary = {
+        'total_true_waders': total,
+        'top1_count': int(top1),
+        'top2_count': int(top2),
+        'top3_count': int(top3),
+        'top2_not_top1_count': int(top2_not_top1),
+        'top2_not_top1_pct': round(100 * top2_not_top1 / total, 1),
+        'top3_not_top1_count': int(top3_not_top1),
+        'top3_not_top1_pct': round(100 * top3_not_top1 / total, 1),
+    }
+
+    # Tiny post-hoc multiplier check: small Waders score adjustments only.
+    base_waders_ap = average_precision_score(solution_df[target], oof_aligned[target])
+    base_map = average_precision_score(
+        solution_df[needed_columns],
+        oof_aligned[needed_columns],
+        average='macro'
+    )
+
+    rows = []
+    for mult in [1.00, 1.05, 1.10, 1.15]:
+        adjusted = oof_aligned.copy()
+        adjusted[target] = adjusted[target] * mult
+
+        w_ap = average_precision_score(solution_df[target], adjusted[target])
+        m_ap = average_precision_score(
+            solution_df[needed_columns],
+            adjusted[needed_columns],
+            average='macro'
+        )
+        rows.append({
+            'waders_multiplier': mult,
+            'waders_ap': round(w_ap, 4),
+            'delta_waders_ap': round(w_ap - base_waders_ap, 4),
+            'macro_map': round(m_ap, 4),
+            'delta_macro_map': round(m_ap - base_map, 4),
+        })
+
+    return summary, pd.DataFrame(rows)
+
+
+def analyze_waders_vs_gulls_boundary(solution_df, oof_aligned):
+    """
+    Focused diagnostics for Waders-vs-Gulls boundary behavior.
+
+    Returns:
+      - summary dict
+      - true_waders_pred_gulls_top23_df: row-level cases where true=Waders, pred=Gulls, Waders in top2/top3
+      - pred_gulls_waders_rank23_df: row-level cases where pred=Gulls, Waders rank is 2 or 3
+      - pred_gulls_rank23_true_class_df: true-class composition for pred=Gulls with Waders rank 2/3
+      - gap_quantiles_df: gap quantiles for key subsets
+    """
+    target = 'Waders'
+    blocker = 'Gulls'
+    if target not in oof_aligned.columns or blocker not in oof_aligned.columns:
+        return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    pred_top1 = oof_aligned.idxmax(axis=1)
+    true_class = solution_df.idxmax(axis=1)
+    ranks = oof_aligned.rank(axis=1, method='min', ascending=False)
+
+    waders_prob = oof_aligned[target]
+    gulls_prob = oof_aligned[blocker]
+    gap_gull_minus_waders = gulls_prob - waders_prob
+
+    # A) true=Waders, pred=Gulls, and Waders in top2/top3
+    mask_true_waders_pred_gulls = (true_class == target) & (pred_top1 == blocker)
+    mask_true_waders_pred_gulls_top23 = mask_true_waders_pred_gulls & (ranks[target] <= 3)
+
+    true_waders_pred_gulls_top23_df = pd.DataFrame({
+        'true_class': true_class[mask_true_waders_pred_gulls_top23],
+        'pred_top1': pred_top1[mask_true_waders_pred_gulls_top23],
+        'waders_rank': ranks[target][mask_true_waders_pred_gulls_top23].astype(int),
+        'gulls_prob': gulls_prob[mask_true_waders_pred_gulls_top23].round(6),
+        'waders_prob': waders_prob[mask_true_waders_pred_gulls_top23].round(6),
+        'gap_gull_minus_waders': gap_gull_minus_waders[mask_true_waders_pred_gulls_top23].round(6),
+    })
+
+    # B) pred=Gulls and Waders is rank2 or rank3
+    mask_pred_gulls_waders_rank23 = (pred_top1 == blocker) & (ranks[target].isin([2, 3]))
+    pred_gulls_waders_rank23_df = pd.DataFrame({
+        'true_class': true_class[mask_pred_gulls_waders_rank23],
+        'pred_top1': pred_top1[mask_pred_gulls_waders_rank23],
+        'waders_rank': ranks[target][mask_pred_gulls_waders_rank23].astype(int),
+        'gulls_prob': gulls_prob[mask_pred_gulls_waders_rank23].round(6),
+        'waders_prob': waders_prob[mask_pred_gulls_waders_rank23].round(6),
+        'gap_gull_minus_waders': gap_gull_minus_waders[mask_pred_gulls_waders_rank23].round(6),
+    })
+
+    if not pred_gulls_waders_rank23_df.empty:
+        pred_gulls_rank23_true_class_df = (
+            pred_gulls_waders_rank23_df['true_class']
+            .value_counts()
+            .rename_axis('true_class')
+            .reset_index(name='count')
+        )
+        pred_gulls_rank23_true_class_df['pct'] = (
+            100.0 * pred_gulls_rank23_true_class_df['count'] / len(pred_gulls_waders_rank23_df)
+        ).round(1)
+    else:
+        pred_gulls_rank23_true_class_df = pd.DataFrame({'true_class': [], 'count': [], 'pct': []})
+
+    def _quantiles(series):
+        if len(series) == 0:
+            return {'q10': np.nan, 'q25': np.nan, 'q50': np.nan, 'q75': np.nan, 'q90': np.nan}
+        return {
+            'q10': float(np.quantile(series, 0.10)),
+            'q25': float(np.quantile(series, 0.25)),
+            'q50': float(np.quantile(series, 0.50)),
+            'q75': float(np.quantile(series, 0.75)),
+            'q90': float(np.quantile(series, 0.90)),
+        }
+
+    q_a = _quantiles(true_waders_pred_gulls_top23_df['gap_gull_minus_waders'].values)
+    q_b = _quantiles(pred_gulls_waders_rank23_df['gap_gull_minus_waders'].values)
+    gap_quantiles_df = pd.DataFrame([
+        {'subset': 'true_waders_pred_gulls_top23', **{k: round(v, 6) if pd.notna(v) else np.nan for k, v in q_a.items()}},
+        {'subset': 'pred_gulls_waders_rank23', **{k: round(v, 6) if pd.notna(v) else np.nan for k, v in q_b.items()}},
+    ])
+
+    # Plausibility counters for narrow reranking rules on small margins.
+    thresholds = [0.01, 0.02, 0.05, 0.10]
+    summary = {
+        'count_true_waders_pred_gulls': int(mask_true_waders_pred_gulls.sum()),
+        'count_true_waders_pred_gulls_top23': int(mask_true_waders_pred_gulls_top23.sum()),
+        'count_pred_gulls_waders_rank23': int(mask_pred_gulls_waders_rank23.sum()),
+        'count_pred_gulls_waders_rank2': int(((pred_top1 == blocker) & (ranks[target] == 2)).sum()),
+        'count_pred_gulls_waders_rank3': int(((pred_top1 == blocker) & (ranks[target] == 3)).sum()),
+        'avg_gap_true_waders_pred_gulls_top23': round(
+            float(true_waders_pred_gulls_top23_df['gap_gull_minus_waders'].mean()), 6
+        ) if not true_waders_pred_gulls_top23_df.empty else np.nan,
+        'avg_gap_pred_gulls_waders_rank23': round(
+            float(pred_gulls_waders_rank23_df['gap_gull_minus_waders'].mean()), 6
+        ) if not pred_gulls_waders_rank23_df.empty else np.nan,
+    }
+
+    for th in thresholds:
+        key_a = f'count_true_waders_pred_gulls_top23_gap_le_{th:.2f}'
+        key_b = f'count_pred_gulls_waders_rank23_gap_le_{th:.2f}'
+        summary[key_a] = int((true_waders_pred_gulls_top23_df['gap_gull_minus_waders'] <= th).sum())
+        summary[key_b] = int((pred_gulls_waders_rank23_df['gap_gull_minus_waders'] <= th).sum())
+
+    if not pred_gulls_waders_rank23_df.empty:
+        summary['pct_true_waders_within_pred_gulls_waders_rank23'] = round(
+            100.0 * (pred_gulls_waders_rank23_df['true_class'] == target).sum() / len(pred_gulls_waders_rank23_df),
+            1,
+        )
+    else:
+        summary['pct_true_waders_within_pred_gulls_waders_rank23'] = np.nan
+
+    return (
+        summary,
+        true_waders_pred_gulls_top23_df,
+        pred_gulls_waders_rank23_df,
+        pred_gulls_rank23_true_class_df,
+        gap_quantiles_df,
+    )
+
+
+# ─── Generate diagnostics for Cormorants ───
+print(f"\n{'='*70}")
+print("WEAK-CLASS DIAGNOSTICS: CORMORANTS")
+print('='*70)
+
+target = 'Cormorants'
+print(f"\n1. False-Negative Absorption (where true={target} but prediction is wrong):")
+fn_absorption_cormorants = analyze_false_negatives(
+    solution_df, oof_aligned, target, needed_columns
+)
+print(fn_absorption_cormorants.to_string(index=False))
+fn_absorption_cormorants.to_csv(
+    diag_dir / f'{target.lower()}_false_negative_absorption.csv',
+    index=False
+)
+print(f"   → saved to diagnostics/{target.lower()}_false_negative_absorption.csv")
+
+print(f"\n2. False-Positive Sources (where predicted={target} but true label is different):")
+fp_sources_cormorants = analyze_false_positives(
+    solution_df, oof_aligned, target, needed_columns
+)
+print(fp_sources_cormorants.to_string(index=False))
+fp_sources_cormorants.to_csv(
+    diag_dir / f'{target.lower()}_false_positive_sources.csv',
+    index=False
+)
+print(f"   → saved to diagnostics/{target.lower()}_false_positive_sources.csv")
+
+print(f"\n3. Top-K Probability Diagnostics:")
+topk_cormorants = analyze_topk_probability(solution_df, oof_aligned, target)
+for key, val in topk_cormorants.items():
+    print(f"   {key:30s}: {val}")
+
+print(f"\n4. Gull Overlap Check:")
+gull_overlap_cormorants = analyze_gull_overlap(solution_df, oof_aligned, target, needed_columns)
+for key, val in gull_overlap_cormorants.items():
+    print(f"   {key:40s}: {val}")
+
+# ─── Generate diagnostics for Waders ───
+print(f"\n{'='*70}")
+print("WEAK-CLASS DIAGNOSTICS: WADERS")
+print('='*70)
+
+target = 'Waders'
+print(f"\n1. False-Negative Absorption (where true={target} but prediction is wrong):")
+fn_absorption_waders = analyze_false_negatives(
+    solution_df, oof_aligned, target, needed_columns
+)
+print(fn_absorption_waders.to_string(index=False))
+fn_absorption_waders.to_csv(
+    diag_dir / f'{target.lower()}_false_negative_absorption.csv',
+    index=False
+)
+print(f"   → saved to diagnostics/{target.lower()}_false_negative_absorption.csv")
+
+print(f"\n2. False-Positive Sources (where predicted={target} but true label is different):")
+fp_sources_waders = analyze_false_positives(
+    solution_df, oof_aligned, target, needed_columns
+)
+print(fp_sources_waders.to_string(index=False))
+fp_sources_waders.to_csv(
+    diag_dir / f'{target.lower()}_false_positive_sources.csv',
+    index=False
+)
+print(f"   → saved to diagnostics/{target.lower()}_false_positive_sources.csv")
+
+print(f"\n3. Top-K Probability Diagnostics:")
+topk_waders = analyze_topk_probability(solution_df, oof_aligned, target)
+for key, val in topk_waders.items():
+    print(f"   {key:30s}: {val}")
+
+print(f"\n4. Gull Overlap Check:")
+gull_overlap_waders = analyze_gull_overlap(solution_df, oof_aligned, target, needed_columns)
+for key, val in gull_overlap_waders.items():
+    print(f"   {key:40s}: {val}")
+
+print(f"\n5. Waders Post-Hoc Ranking/Calibration Check:")
+waders_posthoc_summary, waders_posthoc_table = analyze_waders_posthoc(
+    solution_df,
+    oof_aligned,
+    needed_columns,
+)
+if waders_posthoc_summary is not None:
+    for key, val in waders_posthoc_summary.items():
+        print(f"   {key:40s}: {val}")
+    print("\n   Small Waders multiplier test (no retraining):")
+    print(waders_posthoc_table.to_string(index=False))
+    waders_posthoc_table.to_csv(
+        diag_dir / 'waders_posthoc_multiplier_check.csv',
+        index=False,
+    )
+    print("   -> saved to diagnostics/waders_posthoc_multiplier_check.csv")
+
+print(f"\n6. Waders-vs-Gulls Boundary Diagnostics:")
+(
+    waders_gulls_summary,
+    waders_gulls_truew_predg_top23_df,
+    waders_gulls_predg_rank23_df,
+    waders_gulls_predg_rank23_trueclass_df,
+    waders_gulls_gap_quantiles_df,
+) = analyze_waders_vs_gulls_boundary(solution_df, oof_aligned)
+
+if waders_gulls_summary is not None:
+    print("   A) true=Waders, pred=Gulls, Waders in top2/top3")
+    for key, val in waders_gulls_summary.items():
+        print(f"   {key:52s}: {val}")
+
+    print("\n   B) true-class mix when pred=Gulls and Waders rank is 2 or 3:")
+    if not waders_gulls_predg_rank23_trueclass_df.empty:
+        print(waders_gulls_predg_rank23_trueclass_df.to_string(index=False))
+    else:
+        print("   (no rows)")
+
+    print("\n   C) gap quantiles (gulls_prob - waders_prob):")
+    print(waders_gulls_gap_quantiles_df.to_string(index=False))
+
+    waders_gulls_truew_predg_top23_df.to_csv(
+        diag_dir / 'waders_vs_gulls_true_waders_pred_gulls_top23_rows.csv',
+        index=False,
+    )
+    waders_gulls_predg_rank23_df.to_csv(
+        diag_dir / 'waders_vs_gulls_pred_gulls_waders_rank23_rows.csv',
+        index=False,
+    )
+    waders_gulls_predg_rank23_trueclass_df.to_csv(
+        diag_dir / 'waders_vs_gulls_pred_gulls_waders_rank23_true_class_mix.csv',
+        index=False,
+    )
+    waders_gulls_gap_quantiles_df.to_csv(
+        diag_dir / 'waders_vs_gulls_gap_quantiles.csv',
+        index=False,
+    )
+    pd.DataFrame([waders_gulls_summary]).to_csv(
+        diag_dir / 'waders_vs_gulls_summary.csv',
+        index=False,
+    )
+
+    print("\n   -> saved to diagnostics/waders_vs_gulls_summary.csv")
+    print("   -> saved to diagnostics/waders_vs_gulls_true_waders_pred_gulls_top23_rows.csv")
+    print("   -> saved to diagnostics/waders_vs_gulls_pred_gulls_waders_rank23_rows.csv")
+    print("   -> saved to diagnostics/waders_vs_gulls_pred_gulls_waders_rank23_true_class_mix.csv")
+    print("   -> saved to diagnostics/waders_vs_gulls_gap_quantiles.csv")
+
+print(f"\n{'='*70}")
+print("Weak-class diagnostics complete. CSV files saved to ./diagnostics/")
+print('='*70)
 
 # ─────────────────────────────────────────────
 # 10. Generate Submission
