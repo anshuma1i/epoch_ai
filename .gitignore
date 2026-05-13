@@ -10,3 +10,13 @@ catboost_info/
 mlruns/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# Agent configuration files (not for public distribution)
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+
+# Unrelated files
+safety/
+ai_safety_charts_v2.py
