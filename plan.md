@@ -77,20 +77,20 @@ boost-weak=3, oversampler=SMOTENC
 ## CLI Usage
 ```bash
 # ADASYN (current best verified)
-.venv/bin/python -W ignore solution.py --oversampler adasyn
+uv run solution.py --oversampler adasyn
 
 # Trajectory augmentation
-.venv/bin/python -W ignore solution.py --oversampler trajectory
+uv run solution.py --oversampler trajectory
 
 # Trajectory augmentation with reduced jitter
-.venv/bin/python -W ignore solution.py --oversampler trajectory --jitter-scale 0.5
+uv run solution.py --oversampler trajectory --jitter-scale 0.5
 
 # ADASYN + trajectory combined
-.venv/bin/python -W ignore solution.py --oversampler adasyn+trajectory
+uv run solution.py --oversampler adasyn+trajectory
 
 # Pseudo-labeling
-.venv/bin/python -W ignore solution.py --oversampler adasyn --pseudo-label
+uv run solution.py --oversampler adasyn --pseudo-label
 
 # BorderlineSMOTE
-.venv/bin/python -W ignore solution.py --oversampler borderline
+uv run solution.py --oversampler borderline
 ```

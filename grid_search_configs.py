@@ -9,8 +9,8 @@ import subprocess
 import sys
 import time
 
-PYTHON = ".venv/bin/python"
-SCRIPT = "solution.py"
+PYTHON = "uv"
+SCRIPT = "run"
 LOG_FILE = "grid_search_results.txt"
 
 DATASETS = ["knmi", "openmeteo", "all"]
@@ -25,7 +25,7 @@ CLASS_NAMES = [
 
 
 def build_cmd(dataset, ensemble, two_stage, boost_weak):
-    cmd = [PYTHON, "-W", "ignore", SCRIPT, "--dataset", dataset]
+    cmd = [PYTHON, SCRIPT, "solution.py", "--dataset", dataset]
     if ensemble:
         cmd.append("--ensemble")
     if two_stage:

@@ -156,6 +156,8 @@ Two aggregation strategies were compared:
 .
 ├── solution.py                  # Main two-stage pipeline with CLI
 ├── solution_v2.py               # Version 2 with CNN embedding integration
+├── pyproject.toml               # Project configuration and dependencies
+├── uv.lock                      # Locked dependency versions
 ├── submission.ipynb             # Jupyter notebook version of the pipeline
 ├── test-notebook-aicup2026.py   # Starter notebook (baseline reference)
 ├── join_knmi_286.py             # KNMI hourly weather merge script
@@ -186,13 +188,17 @@ Two aggregation strategies were compared:
 
 ### Prerequisites
 
+[uv](https://docs.astral.sh/uv/) is required to manage dependencies and run the project.
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install lightgbm catboost xgboost scikit-learn imbalanced-learn shapely pandas numpy mlflow matplotlib seaborn
+uv sync
 ```
 
-For CNN features: additionally install `torch`.
+For CNN features, additionally include the optional `cnn` dependency group:
+
+```bash
+uv sync --extra cnn
+```
 
 ### Weather Data Preparation
 
@@ -200,13 +206,13 @@ The dataset CSV files must be enriched with weather data before training:
 
 ```bash
 # KNMI (local station data)
-.venv/bin/python join_knmi_286.py --train_csv dataset/train.csv --test_csv dataset/test.csv --knmi_txt dataset/286_2021-2030.txt
+uv run join_knmi_286.py --train_csv dataset/train.csv --test_csv dataset/test.csv --knmi_txt dataset/286_2021-2030.txt
 
 # Open-Meteo (archive API)
-.venv/bin/python join_openmeteo_weather.py --train_csv dataset/train.csv --test_csv dataset/test.csv
+uv run join_openmeteo_weather.py --train_csv dataset/train.csv --test_csv dataset/test.csv
 
 # Combined KNMI + Open-Meteo
-.venv/bin/python join_all_weather.py --train_csv dataset/train.csv --test_csv dataset/test.csv --knmi_txt dataset/286_2021-2030.txt
+uv run join_all_weather.py --train_csv dataset/train.csv --test_csv dataset/test.csv --knmi_txt dataset/286_2021-2030.txt
 ```
 
 ### Training a Model
@@ -215,39 +221,39 @@ The main pipeline exposes all configuration axes as CLI flags:
 
 ```bash
 # Default: OpenMeteo, two-stage, SMOTENC, 10-fold CV
-.venv/bin/python -W ignore solution.py
+uv run solution.py
 
 # Best verified configuration: ADASYN oversampling
-.venv/bin/python -W ignore solution.py --oversampler adasyn
+uv run solution.py --oversampler adasyn
 
 # Trajectory augmentation with reduced jitter
-.venv/bin/python -W ignore solution.py --oversampler trajectory --jitter-scale 0.5
+uv run solution.py --oversampler trajectory --jitter-scale 0.5
 
 # Full ensemble with seed averaging and rank aggregation
-.venv/bin/python -W ignore solution.py --dataset openmeteo --oversampler adasyn \
+uv run solution.py --dataset openmeteo --oversampler adasyn \
     --boost-weak 3 --n-seeds 5 --gull-threshold 0.8
 
 # Pseudo-labeling experiment
-.venv/bin/python -W ignore solution.py --oversampler adasyn --pseudo-label --pseudo-threshold 0.95
+uv run solution.py --oversampler adasyn --pseudo-label --pseudo-threshold 0.95
 
 # Grid search over all architecture combinations
-.venv/bin/python -W ignore grid_search_configs.py
+uv run grid_search_configs.py
 
 # Overfitting diagnostics
-.venv/bin/python -W ignore diagnose_overfit.py
+uv run diagnose_overfit.py
 ```
 
 ### CNN Embedding Pipeline (Version 2)
 
 ```bash
 # Extract CNN features
-.venv/bin/python -W ignore extract_cnn_features.py --epochs 100 --patience 10
+uv run extract_cnn_features.py --epochs 100 --patience 10
 
 # Merge with weather-enriched data
-.venv/bin/python -W ignore join_cnn_features.py
+uv run join_cnn_features.py
 
 # Train with CNN embeddings
-.venv/bin/python -W ignore solution_v2.py
+uv run solution_v2.py
 ```
 
 ### Generating a Submission

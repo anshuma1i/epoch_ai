@@ -1,0 +1,26 @@
+[project]
+name = "aicup2026-bird-radar"
+version = "0.1.0"
+description = "AI Cup 2026 Performance Track -- Bird radar track classification"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "catboost>=1.2.10",
+    "imbalanced-learn>=0.14.1",
+    "lightgbm>=4.6.0",
+    "matplotlib>=3.10.9",
+    "mlflow>=3.12.0",
+    "numpy>=2.4.4",
+    "pandas>=2.3.3",
+    "requests>=2.34.0",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "seaborn>=0.13.2",
+    "shapely>=2.1.2",
+    "xgboost>=3.2.0",
+]
+
+[project.optional-dependencies]
+cnn = [
+    "torch>=2.12.0",
+]
